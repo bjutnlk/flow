@@ -4,7 +4,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.flow.engine.exception.FlowException;
 import com.flow.engine.exception.HandlerNotFoundException;
 import com.flow.engine.exception.NodeNotFoundException;
-import com.flow.engine.exception.UnsupportedVersionException;
 import com.flow.engine.handler.HandleResult;
 import com.flow.engine.handler.NodeHandler;
 import com.flow.engine.model.*;
@@ -24,24 +23,14 @@ import java.util.concurrent.ConcurrentHashMap;
 /**
  * Core flow execution engine (Spring {@code @Service} bean).
  *
- * <h3>Spring auto-wiring</h3>
- * <p>All {@link NodeHandler} beans in the application context are auto-collected
- * by Spring via constructor injection ({@code List<NodeHandler>}).  No manual
- * registration is needed — just annotate your handler with {@code @Component}
- * and it will be discovered.
+ * <h3>Pre-execution validation</h3>
+ * <p>{@link FlowValidator#validate} is called before every execution,
+ * checking version, start/end nodes, broken references, reachability,
+ * and cycles — all at once, all errors returned together.
  *
  * <h3>DAG execution</h3>
- * <p>Supports both linear chains ({@code next: "b"}) and fork-join DAGs:
- * <ul>
- *   <li><b>Fork</b> — {@code next: ["b", "d"]} activates multiple branches.</li>
- *   <li><b>Join</b> — {@code waitFor: ["b", "d"]} blocks until all listed
- *       predecessors have completed.</li>
- * </ul>
- *
- * <h3>Execution recording</h3>
- * <p>The engine builds an {@link ExecutionLog} during the run and calls
- * {@link ExecutionRecorder#save} exactly once after the flow completes.
- * There are no per-node callbacks during execution.
+ * <p>Supports linear chains, fork ({@code next: ["b","d"]}), and join
+ * ({@code waitFor} auto-computed from prevNodes with 2+ predecessors).
  */
 @Service
 public class FlowEngine {
@@ -49,25 +38,23 @@ public class FlowEngine {
     private static final Logger log = LoggerFactory.getLogger(FlowEngine.class);
     private static final int MAX_STEPS = 1000;
 
-    public static final String MIN_VERSION = "1.0";
     public static final String CURRENT_VERSION = "2.0";
 
     private final ObjectMapper objectMapper;
     private final InputResolver inputResolver;
     private final ExecutionRecorder executionRecorder;
+    private final FlowValidator flowValidator;
     private final Map<String, NodeHandler> handlerRegistry = new ConcurrentHashMap<>();
 
-    /**
-     * Spring injects all {@link NodeHandler} beans automatically via
-     * the {@code List<NodeHandler>} parameter.
-     */
     public FlowEngine(ObjectMapper objectMapper,
                       InputResolver inputResolver,
                       ExecutionRecorder executionRecorder,
+                      FlowValidator flowValidator,
                       List<NodeHandler> handlers) {
         this.objectMapper = objectMapper;
         this.inputResolver = inputResolver;
         this.executionRecorder = executionRecorder;
+        this.flowValidator = flowValidator;
         handlers.forEach(h -> {
             handlerRegistry.put(h.getType(), h);
             log.debug("Registered handler for node type '{}'", h.getType());
@@ -97,19 +84,7 @@ public class FlowEngine {
         }
     }
 
-    // ---- version validation -------------------------------------------------
-
-    public void validateVersion(FlowDefinition definition) {
-        String version = definition.getVersion();
-        if (version == null || version.isBlank()) {
-            throw new UnsupportedVersionException(
-                    definition.getId(), "(not set)", MIN_VERSION);
-        }
-        if (compareVersions(version, MIN_VERSION) < 0) {
-            throw new UnsupportedVersionException(
-                    definition.getId(), version, MIN_VERSION);
-        }
-    }
+    // ---- version comparison (static utility) --------------------------------
 
     public static int compareVersions(String a, String b) {
         String[] aParts = a.split("\\.");
@@ -134,15 +109,9 @@ public class FlowEngine {
         return execute(definition, new FlowContext(definition.getId()));
     }
 
-    /**
-     * Execute a flow definition with the given context.
-     *
-     * <p>Uses a ready-queue approach to support both linear chains and
-     * fork-join DAGs.  A node becomes "ready" when all its {@code waitFor}
-     * predecessors have completed.
-     */
     public FlowResult execute(FlowDefinition definition, FlowContext context) {
-        validateVersion(definition);
+        // Pre-execution validation: version, structure, cycles, reachability
+        flowValidator.validate(definition);
 
         Map<String, FlowNode> nodeMap = definition.toNodeMap();
         List<String> trace = new ArrayList<>();
@@ -172,11 +141,8 @@ public class FlowEngine {
                     throw new NodeNotFoundException(definition.getId(), currentNodeId);
                 }
 
-                // Join check: are all waitFor predecessors completed?
                 if (node.isJoin() && !completedNodes.containsAll(node.getWaitFor())) {
-                    // Not ready yet — re-enqueue at the back
                     readyQueue.addLast(currentNodeId);
-                    // Prevent infinite spin: if the queue only contains this node, it's a deadlock
                     if (readyQueue.size() == 1) {
                         List<String> missing = new ArrayList<>(node.getWaitFor());
                         missing.removeAll(completedNodes);
@@ -197,7 +163,6 @@ public class FlowEngine {
                     throw new HandlerNotFoundException(definition.getId(), node.getType());
                 }
 
-                // Build node execution log
                 NodeExecutionLog nodeLog = new NodeExecutionLog(
                         node.getId(), node.getType(), node.getName(), steps);
 
@@ -217,7 +182,6 @@ public class FlowEngine {
                     nodeLog.markSuccess(outputSnapshot);
                     completedNodes.add(currentNodeId);
 
-                    // Determine next node(s)
                     if (result.hasExplicitRoute()) {
                         readyQueue.add(result.getNextNodeId());
                     } else if (node.getNext() != null) {
@@ -240,7 +204,6 @@ public class FlowEngine {
 
             if (steps >= MAX_STEPS) {
                 String msg = "Exceeded maximum step limit: " + MAX_STEPS;
-                log.warn("Flow '{}' {}", definition.getId(), msg);
                 executionLog.markFailed(msg);
                 executionRecorder.save(executionLog);
                 return FlowResult.failure(definition.getId(), context.getAllVariables(),
@@ -272,7 +235,6 @@ public class FlowEngine {
 
     public void registerHandler(NodeHandler handler) {
         handlerRegistry.put(handler.getType(), handler);
-        log.info("Registered handler for node type '{}'", handler.getType());
     }
 
     public boolean hasHandler(String nodeType) {

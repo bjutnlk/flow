@@ -81,8 +81,11 @@ public class FlowDefinition {
     }
 
     public Map<String, FlowNode> toNodeMap() {
-        return nodes.stream()
-                .collect(Collectors.toMap(FlowNode::getId, Function.identity()));
+        Map<String, FlowNode> map = new LinkedHashMap<>();
+        for (FlowNode node : nodes) {
+            map.put(node.getId(), node);
+        }
+        return map;
     }
 
     /**
