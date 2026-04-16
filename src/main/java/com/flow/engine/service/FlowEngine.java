@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.flow.engine.exception.FlowException;
 import com.flow.engine.exception.HandlerNotFoundException;
 import com.flow.engine.exception.NodeNotFoundException;
+import com.flow.engine.handler.HandleResult;
 import com.flow.engine.handler.NodeHandler;
 import com.flow.engine.model.*;
 import com.flow.engine.resolve.InputResolver;
@@ -21,21 +22,22 @@ import java.util.concurrent.ConcurrentHashMap;
 /**
  * Core flow execution engine (Spring {@code @Service} bean).
  *
- * <h3>Execution lifecycle for each node</h3>
+ * <p>The engine treats every node identically in its execution loop:
  * <ol>
  *   <li><b>Resolve inputs</b> — if the node has {@code inputMappings},
- *       the engine uses {@link InputResolver} to turn source expressions
- *       ({@code ${nodeA.file}}, {@code file:xxx}, {@code ${var}}) into
- *       concrete values.  Resolved inputs are placed in the context's
- *       resolved-input map for the handler to consume.</li>
- *   <li><b>Execute</b> — the handler's {@link NodeHandler#execute} method
- *       is called.  If it returns a non-null {@link NodeOutput}, the
- *       output is stored under the node's id so downstream nodes can
- *       reference it as {@code ${thisNodeId.fieldName}}.</li>
- *   <li><b>Route</b> — the handler's {@link NodeHandler#handle} method
- *       determines the next node id (explicit return or fall back to
- *       {@code node.next}).</li>
+ *       resolve source expressions into concrete values.</li>
+ *   <li><b>Execute</b> — dispatch to the matching {@link NodeHandler}.
+ *       The handler returns a {@link HandleResult} carrying an optional
+ *       {@link NodeOutput} and an optional routing override.</li>
+ *   <li><b>Store output</b> — if the handler produced output, store it
+ *       under the node's id for downstream {@code ${nodeId.field}} references.</li>
+ *   <li><b>Route</b> — use the handler's explicit route if provided,
+ *       otherwise follow {@code node.next}.</li>
  * </ol>
+ *
+ * <p>There is no category distinction — whether a node does condition
+ * branching, file processing, or logging is purely the handler's concern.
+ * Any node can produce output, and any node can influence routing.
  */
 @Service
 public class FlowEngine {
@@ -107,22 +109,24 @@ public class FlowEngine {
                     throw new HandlerNotFoundException(definition.getId(), node.getType());
                 }
 
-                // 1. Resolve input mappings
+                // 1. Resolve input mappings (any node can have them)
                 resolveInputs(node, context);
 
-                // 2. Execute — produce structured output
-                NodeOutput output = handler.execute(node, context);
-                if (output != null) {
-                    context.setNodeOutput(currentNodeId, output);
-                    publishOutputAsVariables(currentNodeId, output, context);
-                    log.debug("Node '{}' produced output: {}", currentNodeId, output);
+                // 2. Execute the handler
+                HandleResult result = handler.execute(node, context);
+
+                // 3. Store output if produced (any node can produce output)
+                if (result.hasOutput()) {
+                    context.setNodeOutput(currentNodeId, result.getOutput());
+                    publishOutputAsVariables(currentNodeId, result.getOutput(), context);
+                    log.debug("Node '{}' produced output: {}", currentNodeId, result.getOutput());
                 }
 
-                // 3. Route
-                String handlerNext = handler.handle(node, context);
-                currentNodeId = handlerNext != null ? handlerNext : node.getNext();
+                // 4. Route: explicit override → node.next → stop
+                currentNodeId = result.hasExplicitRoute()
+                        ? result.getNextNodeId()
+                        : node.getNext();
 
-                // Clean up per-node resolved inputs
                 context.clearResolvedInputs();
             }
 
@@ -167,10 +171,6 @@ public class FlowEngine {
         log.debug("Resolved {} input(s) for node '{}'", resolved.size(), node.getId());
     }
 
-    /**
-     * Also publish each output field as a flat context variable under
-     * the key "nodeId.fieldName" for backward-compatible ${} resolution.
-     */
     private void publishOutputAsVariables(String nodeId, NodeOutput output, FlowContext context) {
         output.getEntries().forEach((name, entry) -> {
             context.setVariable(nodeId + "." + name, entry.getValue());

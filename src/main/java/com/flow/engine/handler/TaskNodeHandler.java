@@ -7,8 +7,9 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 /**
- * Generic task node — copies all declared properties into the context
- * (property key → context variable).
+ * Generic utility node — copies all declared properties into the context
+ * as flat variables.  Useful for setting constants, injecting test data,
+ * or bridging between capability nodes.
  */
 @Component
 public class TaskNodeHandler implements NodeHandler {
@@ -21,9 +22,9 @@ public class TaskNodeHandler implements NodeHandler {
     }
 
     @Override
-    public String handle(FlowNode node, FlowContext context) {
+    public HandleResult execute(FlowNode node, FlowContext context) {
         log.info("[Task] Executing node '{}' ({})", node.getId(), node.getName());
         node.getProperties().forEach(context::setVariable);
-        return null;
+        return HandleResult.none();
     }
 }

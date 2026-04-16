@@ -1,26 +1,28 @@
 package com.flow.engine.handler.capability;
 
+import com.flow.engine.handler.HandleResult;
 import com.flow.engine.handler.NodeHandler;
 import com.flow.engine.model.FlowContext;
 import com.flow.engine.model.FlowNode;
 import com.flow.engine.model.NodeOutput;
 
 /**
- * Base class for capability (business-logic) handlers that produce typed outputs.
+ * Convenience base class for handlers that always produce output and
+ * never override routing (follow {@code node.next}).
  *
- * <p>Subclasses override {@link #execute(FlowNode, FlowContext)} to perform
- * the actual work and return a {@link NodeOutput}.  Routing is handled by
- * the default {@link #handle} implementation which simply returns {@code null}
- * (follow the node's {@code next} pointer).  Override {@code handle} only
- * if the capability needs to influence routing.
+ * <p>Subclasses implement {@link #doExecute} and return a {@link NodeOutput};
+ * routing is handled automatically.
  */
 public abstract class CapabilityNodeHandler implements NodeHandler {
 
     @Override
-    public String handle(FlowNode node, FlowContext context) {
-        return null;
+    public HandleResult execute(FlowNode node, FlowContext context) {
+        NodeOutput output = doExecute(node, context);
+        return HandleResult.output(output);
     }
 
-    @Override
-    public abstract NodeOutput execute(FlowNode node, FlowContext context);
+    /**
+     * Perform the business logic and return typed output.
+     */
+    protected abstract NodeOutput doExecute(FlowNode node, FlowContext context);
 }

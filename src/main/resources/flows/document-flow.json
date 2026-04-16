@@ -6,14 +6,12 @@
     {
       "id": "start",
       "type": "start",
-      "category": "flow",
       "name": "Begin",
       "next": "submit"
     },
     {
       "id": "submit",
       "type": "submit_form",
-      "category": "capability",
       "name": "Submit Application Form",
       "inputMappings": [
         { "name": "applicantName", "source": "${applicantName}", "dataType": "STRING" },
@@ -29,7 +27,6 @@
     {
       "id": "check-amount",
       "type": "condition",
-      "category": "flow",
       "name": "Check Amount",
       "branches": [
         { "condition": "amount > 10000", "target": "aggregate" },
@@ -40,7 +37,6 @@
     {
       "id": "aggregate",
       "type": "aggregate_file",
-      "category": "capability",
       "name": "Aggregate Documents",
       "inputMappings": [
         { "name": "receipt",  "source": "${submit.receiptFile}", "dataType": "FILE" },
@@ -55,7 +51,6 @@
     {
       "id": "log-result",
       "type": "log",
-      "category": "flow",
       "name": "Log Outcome",
       "properties": {
         "message": "Form ${submit.result}, applicant: ${applicantName}"
@@ -65,7 +60,6 @@
     {
       "id": "end",
       "type": "end",
-      "category": "flow",
       "name": "Done"
     }
   ]

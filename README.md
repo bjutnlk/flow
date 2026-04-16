@@ -1,136 +1,164 @@
 # Flow Engine
 
-A lightweight, JSON-driven flow execution engine built on Spring Boot. Define business processes as JSON, execute them node-by-node through a shared context, and extend behavior with custom handlers.
+A lightweight, JSON-driven flow execution engine built on Spring Boot. Define processes as JSON node graphs, execute them sequentially with a shared context, and extend with custom handlers.
+
+## Core Design Principle
+
+**All nodes are equal.** The engine's execution loop treats every node identically:
+
+```
+resolve inputs → execute handler → store output → route to next
+```
+
+There is no hard split between "flow nodes" and "business nodes". Whether a handler branches (condition), iterates (foreach), uploads a file (submit_form), or does nothing (start) — that is purely the handler's internal concern. The engine doesn't know or care.
+
+This means any sequence like `A → B → C → D` works naturally, regardless of what type each node is. You don't need control-flow nodes between capability nodes.
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────┐
-│                    FlowEngine                       │
-│                  (@Service bean)                    │
-│                                                     │
-│  ┌──────────┐   parse JSON    ┌────────────────┐   │
-│  │  JSON    │ ──────────────► │ FlowDefinition │   │
-│  └──────────┘                 │   └─ FlowNode  │   │
-│                               │   └─ FlowNode  │   │
-│                               └────────┬───────┘   │
-│                                        │            │
-│  ┌──────────┐   execute()              ▼            │
-│  │ FlowCtx  │◄────────────── node-by-node walk     │
-│  │ (shared  │                          │            │
-│  │  vars)   │                          ▼            │
-│  └──────────┘               ┌──────────────────┐   │
-│                             │  NodeHandler     │   │
-│                             │  registry        │   │
-│                             │  (type → bean)   │   │
-│                             └──────────────────┘   │
-│                                                     │
-│  Result: FlowResult { success, variables, trace }   │
-└─────────────────────────────────────────────────────┘
+JSON Flow Definition
+        │
+        ▼
+┌────────────────────────────────────────────────────────┐
+│                     FlowEngine                         │
+│                   (@Service bean)                      │
+│                                                        │
+│  for each node:                                        │
+│  ┌──────────────────────────────────────────────────┐  │
+│  │ 1. InputResolver                                 │  │
+│  │    ${nodeA.resultFile} → FileReference            │  │
+│  │    file:abc-123        → FileReference (cloud)    │  │
+│  │    ${varName}          → context variable          │  │
+│  │    literal             → as-is                     │  │
+│  ├──────────────────────────────────────────────────┤  │
+│  │ 2. handler.execute(node, context)                │  │
+│  │    → HandleResult { output?, nextNodeId? }       │  │
+│  ├──────────────────────────────────────────────────┤  │
+│  │ 3. Store output under nodeId                     │  │
+│  │ 4. Route: explicit override → node.next → stop   │  │
+│  └──────────────────────────────────────────────────┘  │
+│                                                        │
+│  FlowContext                                           │
+│  ├── variables: flat key-value pairs                   │
+│  ├── nodeOutputs: { nodeId → NodeOutput }              │
+│  └── resolvedInputs: current node's resolved inputs    │
+└────────────────────────────────────────────────────────┘
 ```
 
-## Core Concepts
+## Handler Interface
 
-| Concept | Description |
-|---------|-------------|
-| **FlowDefinition** | Top-level object parsed from JSON; contains nodes and a start-node reference |
-| **FlowNode** | A single step — has an `id`, `type`, `properties`, optional `next` and `branches` |
-| **FlowContext** | Shared variable bag passed through every node; nodes read/write variables here |
-| **FlowEngine** | Spring `@Service` bean — parses JSON, resolves handlers, walks the node graph |
-| **NodeHandler** | Strategy interface — one implementation per node type (`task`, `condition`, `log`, …) |
-| **FlowResult** | Immutable outcome — success/failure, final variables snapshot, execution trace |
+Every handler implements a single method:
 
-## Built-in Node Types
+```java
+public interface NodeHandler {
+    String getType();
+    HandleResult execute(FlowNode node, FlowContext context);
+}
+```
 
-| Type | Handler | Behavior |
-|------|---------|----------|
-| `start` | `StartNodeHandler` | No-op entry point, logs flow start |
-| `end` | `EndNodeHandler` | Terminates the flow |
-| `task` | `TaskNodeHandler` | Copies all `properties` into context as variables |
-| `condition` | `ConditionNodeHandler` | Evaluates branches (`==`, `!=`, `>`, `<`, `>=`, `<=`) against context; routes to matching target |
-| `log` | `LogNodeHandler` | Logs a message with `${var}` interpolation from context |
+`HandleResult` carries:
+- **output** (optional) — a typed `NodeOutput` stored for downstream `${nodeId.field}` references
+- **nextNodeId** (optional) — routing override; if null, engine follows `node.next`
 
-## JSON Flow Format
+Any handler can produce output. Any handler can influence routing. There is no forced inheritance hierarchy.
+
+## Built-in Handlers
+
+### Generic (control-flow)
+
+| Type | Behavior |
+|------|----------|
+| `start` | Entry point, no-op |
+| `end` | Terminates the flow |
+| `condition` | Evaluates `branches` with operators (`==`, `!=`, `>`, `<`, `>=`, `<=`); supports `${nodeId.field}` in expressions |
+| `switch` | Matches a context value against case branches (exact match) |
+| `foreach` | Iterates over a list, exposes `item`/`index` vars; outputs `count` and `items` |
+| `task` | Copies properties into context variables |
+| `log` | Logs a message with `${var}` / `${nodeId.field}` interpolation |
+
+### Capability (business-logic examples)
+
+| Type | Behavior |
+|------|----------|
+| `submit_form` | Collects inputs as form fields → outputs `result` (STRING) + `receiptFile` (FILE) |
+| `aggregate_file` | Merges input files → outputs `mergedFile` (FILE) + `fileCount` (NUMBER) |
+
+## Consecutive Capability Nodes
+
+No flow nodes required between capability nodes. This works:
 
 ```json
 {
-  "id": "order-flow",
-  "name": "Order Processing",
-  "startNodeId": "start",
+  "startNodeId": "ingest",
   "nodes": [
-    { "id": "start", "type": "start", "name": "Begin", "next": "validate" },
-    { "id": "validate", "type": "task", "name": "Validate",
-      "properties": { "orderStatus": "VALIDATED" }, "next": "check" },
-    { "id": "check", "type": "condition", "name": "Check Amount",
-      "branches": [
-        { "condition": "amount > 1000", "target": "manager" },
-        { "condition": "amount <= 1000", "target": "auto" }
-      ]
+    {
+      "id": "ingest", "type": "submit_form",
+      "inputMappings": [{ "name": "rawFile", "source": "file:raw-001", "dataType": "FILE" }],
+      "next": "transform"
     },
-    { "id": "manager", "type": "task", "name": "Manager Approval",
-      "properties": { "approver": "manager" }, "next": "end" },
-    { "id": "auto", "type": "task", "name": "Auto Approve",
-      "properties": { "approver": "system" }, "next": "end" },
-    { "id": "end", "type": "end", "name": "Done" }
+    {
+      "id": "transform", "type": "submit_form",
+      "inputMappings": [{ "name": "input", "source": "${ingest.receiptFile}", "dataType": "FILE" }],
+      "next": "validate"
+    },
+    {
+      "id": "validate", "type": "submit_form",
+      "inputMappings": [{ "name": "data", "source": "${transform.receiptFile}", "dataType": "FILE" }],
+      "next": "export"
+    },
+    {
+      "id": "export", "type": "aggregate_file",
+      "inputMappings": [
+        { "name": "a", "source": "${validate.receiptFile}", "dataType": "FILE" },
+        { "name": "b", "source": "${transform.receiptFile}", "dataType": "FILE" }
+      ]
+    }
   ]
 }
 ```
 
-## Usage
+Trace: `ingest → transform → validate → export` — all capability, no flow nodes.
 
-```java
-@Service
-public class OrderService {
+## Cross-Node Output References
 
-    private final FlowEngine flowEngine;
+Any node's output is accessible to all downstream nodes via `${nodeId.outputField}`:
 
-    public OrderService(FlowEngine flowEngine) {
-        this.flowEngine = flowEngine;
-    }
-
-    public void processOrder(Order order) {
-        // 1. Parse flow from JSON (string, classpath stream, etc.)
-        FlowDefinition flow = flowEngine.parse(
-            getClass().getResourceAsStream("/flows/order-flow.json"));
-
-        // 2. Create context with shared variables
-        FlowContext ctx = new FlowContext(flow.getId());
-        ctx.setVariable("amount", order.getAmount());
-        ctx.setVariable("orderId", order.getId());
-
-        // 3. Execute
-        FlowResult result = flowEngine.execute(flow, ctx);
-
-        // 4. Inspect result
-        if (result.isSuccess()) {
-            String status = (String) result.getVariables().get("orderStatus");
-            System.out.println("Done: " + status);
-            System.out.println("Trace: " + result.getExecutionTrace());
-        }
-    }
+```json
+{
+  "id": "c", "type": "aggregate_file",
+  "inputMappings": [
+    { "name": "fileFromA", "source": "${a.receiptFile}", "dataType": "FILE" },
+    { "name": "statusFromB", "source": "${b.result}", "dataType": "STRING" }
+  ]
 }
 ```
 
-## Extending with Custom Handlers
+## Input Source Formats
 
-Implement `NodeHandler` and register it as a Spring `@Component`:
+| Format | Example | Resolves to |
+|--------|---------|-------------|
+| `${nodeId.field}` | `${submit.receiptFile}` | Output field from a prior node |
+| `file:xxx` | `file:doc-001` | Cloud storage file → `FileReference` |
+| `${varName}` | `${applicantName}` | Context variable |
+| literal | `hello` | Used as-is |
+
+## Adding Custom Handlers
 
 ```java
 @Component
-public class EmailNodeHandler implements NodeHandler {
+public class EmailHandler implements NodeHandler {
 
     @Override
-    public String getType() {
-        return "email";
-    }
+    public String getType() { return "email"; }
 
     @Override
-    public String handle(FlowNode node, FlowContext context) {
-        String to = (String) node.getProperties().get("to");
-        String body = (String) node.getProperties().get("body");
+    public HandleResult execute(FlowNode node, FlowContext context) {
+        String to = (String) context.getResolvedInput("to");
+        String body = (String) context.getResolvedInput("body");
         // send email ...
-        context.setVariable("emailSent", true);
-        return null; // follow default next
+        NodeOutput out = NodeOutput.single("sent", DataType.BOOLEAN, true);
+        return HandleResult.output(out);
     }
 }
 ```

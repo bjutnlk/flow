@@ -6,9 +6,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
-/**
- * Marks the end of a flow and terminates execution.
- */
 @Component
 public class EndNodeHandler implements NodeHandler {
 
@@ -20,9 +17,9 @@ public class EndNodeHandler implements NodeHandler {
     }
 
     @Override
-    public String handle(FlowNode node, FlowContext context) {
+    public HandleResult execute(FlowNode node, FlowContext context) {
         log.info("[End] Flow '{}' ending at node '{}'", context.getFlowId(), node.getId());
         context.terminate();
-        return null;
+        return HandleResult.none();
     }
 }

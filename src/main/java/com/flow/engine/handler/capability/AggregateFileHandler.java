@@ -15,16 +15,9 @@ import java.nio.charset.StandardCharsets;
 import java.util.Map;
 
 /**
- * Capability handler: aggregates multiple input files into one merged file.
+ * Aggregates multiple input files into one merged file.
  *
- * <p>All resolved inputs whose values are {@link FileReference}s are
- * downloaded, concatenated, and uploaded as a single merged file.
- *
- * <p>Outputs:
- * <ul>
- *   <li>{@code mergedFile} (FILE) — the combined file</li>
- *   <li>{@code fileCount} (NUMBER) — how many files were merged</li>
- * </ul>
+ * <p>Outputs: {@code mergedFile} (FILE), {@code fileCount} (NUMBER).
  */
 @Component
 public class AggregateFileHandler extends CapabilityNodeHandler {
@@ -43,7 +36,7 @@ public class AggregateFileHandler extends CapabilityNodeHandler {
     }
 
     @Override
-    public NodeOutput execute(FlowNode node, FlowContext context) {
+    protected NodeOutput doExecute(FlowNode node, FlowContext context) {
         Map<String, Object> inputs = context.getResolvedInputs();
         log.info("[AggregateFile] Node '{}' aggregating files from {} input(s)", node.getId(), inputs.size());
 
@@ -60,7 +53,6 @@ public class AggregateFileHandler extends CapabilityNodeHandler {
                     }
                     baos.write(content);
                     fileCount++;
-                    log.debug("[AggregateFile] Appended file '{}' ({} bytes)", fr.getFileId(), content.length);
                 } catch (IOException e) {
                     throw new RuntimeException("Failed to aggregate file: " + fr.getFileId(), e);
                 }

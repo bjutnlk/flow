@@ -14,15 +14,10 @@ import java.util.Map;
 import java.util.stream.Collectors;
 
 /**
- * Capability handler: collects resolved inputs as "form fields" and
- * produces a submission receipt file.
+ * Collects resolved inputs as "form fields" and produces a submission
+ * receipt file.
  *
- * <p>Outputs:
- * <ul>
- *   <li>{@code result} (STRING) — submission status</li>
- *   <li>{@code receiptFile} (FILE) — a file stored in cloud storage
- *       containing the submitted data</li>
- * </ul>
+ * <p>Outputs: {@code result} (STRING), {@code receiptFile} (FILE).
  */
 @Component
 public class SubmitFormHandler extends CapabilityNodeHandler {
@@ -41,7 +36,7 @@ public class SubmitFormHandler extends CapabilityNodeHandler {
     }
 
     @Override
-    public NodeOutput execute(FlowNode node, FlowContext context) {
+    protected NodeOutput doExecute(FlowNode node, FlowContext context) {
         Map<String, Object> inputs = context.getResolvedInputs();
         log.info("[SubmitForm] Node '{}' submitting form with {} field(s)", node.getId(), inputs.size());
 

@@ -9,26 +9,24 @@ import java.util.Map;
 /**
  * A single executable node within a flow definition.
  *
- * <p>Nodes fall into two categories:</p>
+ * <p>All nodes are equal in the engine's execution loop — each node is
+ * dispatched to its handler, which may produce output, read inputs, and
+ * influence routing.  There is no hard category distinction; the
+ * {@code type} field alone determines which handler processes the node.
+ *
+ * <p>Convention (not enforced):
  * <ul>
- *   <li><b>flow</b> — structural nodes that control routing (start, end, condition)</li>
- *   <li><b>capability</b> — business-logic nodes that produce typed outputs
- *       (submit_form, aggregate_file, etc.)</li>
+ *   <li><b>Generic / control-flow types</b> — {@code start}, {@code end},
+ *       {@code condition}, {@code switch}, {@code foreach}: business-agnostic
+ *       nodes shipped with the engine.</li>
+ *   <li><b>Capability types</b> — {@code submit_form}, {@code aggregate_file},
+ *       etc.: business-specific nodes registered by the application.</li>
  * </ul>
  *
- * <p>Capability nodes carry {@code inputMappings} and {@code outputMappings}
- * that the engine resolves automatically.  Inputs can reference outputs of
- * upstream nodes via {@code ${nodeId.outputName}}, cloud file IDs via
- * {@code file:xxx}, or plain context variables.
+ * <p>Any node can carry {@code inputMappings} and {@code outputMappings}
+ * — the engine resolves them uniformly before/after execution.
  */
 public class FlowNode {
-
-    /**
-     * "flow" for routing-only nodes, "capability" for nodes that do real work.
-     * Defaults to "capability" when omitted in JSON so that the common case
-     * (business nodes) doesn't require an extra field.
-     */
-    private String category = "capability";
 
     private String id;
     private String type;
@@ -39,21 +37,12 @@ public class FlowNode {
     private List<InputMapping> inputMappings;
     private List<OutputMapping> outputMappings;
 
-    public String getCategory() {
-        return category;
-    }
-
-    public void setCategory(String category) {
-        this.category = category;
-    }
-
-    public boolean isFlowNode() {
-        return "flow".equals(category);
-    }
-
-    public boolean isCapabilityNode() {
-        return !"flow".equals(category);
-    }
+    /**
+     * Optional: body node id for block-structured handlers like
+     * {@code foreach}.  Points to the first node of the sub-chain
+     * that should be executed per iteration.
+     */
+    private String body;
 
     public String getId() {
         return id;
@@ -119,9 +108,17 @@ public class FlowNode {
         this.outputMappings = outputMappings;
     }
 
+    public String getBody() {
+        return body;
+    }
+
+    public void setBody(String body) {
+        this.body = body;
+    }
+
     /**
-     * Conditional branch: evaluated by condition-type nodes to decide
-     * which {@code targetNodeId} to jump to.
+     * Conditional/switch branch: evaluated to decide which
+     * {@code targetNodeId} to jump to.
      */
     public static class Branch {
         private String condition;

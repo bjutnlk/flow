@@ -24,14 +24,8 @@
       "type": "condition",
       "name": "Check Order Amount",
       "branches": [
-        {
-          "condition": "amount > 1000",
-          "target": "approve-manager"
-        },
-        {
-          "condition": "amount <= 1000",
-          "target": "auto-approve"
-        }
+        { "condition": "amount > 1000", "target": "approve-manager" },
+        { "condition": "amount <= 1000", "target": "auto-approve" }
       ],
       "next": "auto-approve"
     },

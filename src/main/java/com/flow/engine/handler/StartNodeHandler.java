@@ -6,9 +6,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
-/**
- * Marks the beginning of a flow. No-op except for logging.
- */
 @Component
 public class StartNodeHandler implements NodeHandler {
 
@@ -20,8 +17,8 @@ public class StartNodeHandler implements NodeHandler {
     }
 
     @Override
-    public String handle(FlowNode node, FlowContext context) {
+    public HandleResult execute(FlowNode node, FlowContext context) {
         log.info("[Start] Flow '{}' started at node '{}'", context.getFlowId(), node.getId());
-        return null;
+        return HandleResult.none();
     }
 }

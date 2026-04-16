@@ -2,48 +2,36 @@ package com.flow.engine.handler;
 
 import com.flow.engine.model.FlowContext;
 import com.flow.engine.model.FlowNode;
-import com.flow.engine.model.NodeOutput;
 
 /**
  * Strategy interface for node execution.
  *
- * <p>Implementations are registered as Spring beans; the engine discovers them
- * automatically via {@link #getType()} and dispatches each node to the
- * matching handler.
+ * <p>Every node — regardless of whether it performs business logic, controls
+ * routing, or both — is processed by a single {@link #execute} method.
+ * The returned {@link HandleResult} carries:
+ * <ul>
+ *   <li>An optional {@link com.flow.engine.model.NodeOutput} that the engine
+ *       stores under the node's id for downstream references.</li>
+ *   <li>An optional next-node id to override the default {@code node.next}.</li>
+ * </ul>
  *
- * <p>A handler can influence routing by returning a specific next-node id
- * from {@link #handle}, or {@code null} to fall back to the node's default
- * {@code next} field.
- *
- * <p>Capability handlers that produce typed outputs (files, strings, images)
- * should override {@link #execute} instead.  The default {@code handle}
- * implementation delegates to {@code execute} and stores the resulting
- * {@link NodeOutput} in the context automatically.
+ * <p>Implementations are registered as Spring beans; the engine discovers
+ * them via {@link #getType()} and dispatches each node to the matching handler.
  */
 public interface NodeHandler {
 
     /**
-     * The node type this handler is responsible for (e.g. "task", "condition", "submit_form").
+     * The node type this handler is responsible for
+     * (e.g. "start", "condition", "submit_form").
      */
     String getType();
 
     /**
-     * Execute the logic for the given node.
+     * Execute the node's logic.
      *
-     * @param node    the current node definition (read-only by convention)
+     * @param node    the current node definition
      * @param context shared mutable context (inputs already resolved)
-     * @return an explicit next-node id, or {@code null} to use {@link FlowNode#getNext()}
+     * @return result containing optional output and optional routing override
      */
-    String handle(FlowNode node, FlowContext context);
-
-    /**
-     * Execute and produce a structured output.  Override this in capability
-     * handlers.  The engine will call this method, store the returned output
-     * under the node's id, and then call {@link #handle} for routing.
-     *
-     * @return node output, or {@code null} if this handler produces no output
-     */
-    default NodeOutput execute(FlowNode node, FlowContext context) {
-        return null;
-    }
+    HandleResult execute(FlowNode node, FlowContext context);
 }
