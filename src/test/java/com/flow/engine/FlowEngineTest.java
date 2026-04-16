@@ -7,12 +7,19 @@ import com.flow.engine.recorder.ExecutionLog;
 import com.flow.engine.recorder.ExecutionRecorder;
 import com.flow.engine.recorder.NodeExecutionLog;
 import com.flow.engine.service.FlowEngine;
+import com.flow.engine.storage.FileStorageService;
+import com.flow.engine.storage.InMemoryFileStorageService;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 
+import java.io.ByteArrayInputStream;
+import java.io.IOException;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipInputStream;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -41,6 +48,9 @@ class FlowEngineTest {
 
     @Autowired
     private ExecutionRecorder recorder;
+
+    @Autowired
+    private FileStorageService fileStorageService;
 
     // ======================================================================
     // Start node: input parameters
@@ -443,8 +453,203 @@ class FlowEngineTest {
     }
 
     // ======================================================================
+    // file_aggregate capability node
+    // ======================================================================
+
+    private void seedFile(String fileId, String fileName, String mimeType, String content) {
+        ((InMemoryFileStorageService) fileStorageService)
+                .seed(fileId, fileName, mimeType, content.getBytes());
+    }
+
+    private Map<String, byte[]> unzip(byte[] zipBytes) throws IOException {
+        Map<String, byte[]> entries = new HashMap<>();
+        try (ZipInputStream zis = new ZipInputStream(new ByteArrayInputStream(zipBytes))) {
+            ZipEntry entry;
+            while ((entry = zis.getNextEntry()) != null) {
+                entries.put(entry.getName(), zis.readAllBytes());
+                zis.closeEntry();
+            }
+        }
+        return entries;
+    }
+
+    @Test
+    void fileAggregate_packsMultipleFilesIntoZip() {
+        seedFile("f1", "report.pdf", "application/pdf", "PDF-CONTENT-HERE");
+        seedFile("f2", "data.csv", "text/csv", "id,name\n1,Alice\n2,Bob");
+
+        String json = """
+                { "version": "2.0", "id": "fa1", "name": "FA1", "startNodeId": "s",
+                  "nodes": [
+                    { "id": "s", "type": "start", "name": "S", "next": "pack" },
+                    { "id": "pack", "type": "file_aggregate", "name": "Pack",
+                      "inputMappings": [
+                        { "name": "report", "source": "file:f1", "dataType": "FILE" },
+                        { "name": "data",   "source": "file:f2", "dataType": "FILE" }
+                      ], "next": "e" },
+                    { "id": "e", "type": "end", "name": "E",
+                      "properties": { "returnValues": {
+                        "zipFile": "${pack.zipFile}",
+                        "fileCount": "${pack.fileCount}",
+                        "fileNames": "${pack.fileNames}"
+                      } } }
+                  ] }
+                """;
+        FlowResult result = engine.execute(engine.parse(json));
+
+        assertTrue(result.isSuccess());
+        assertEquals(2, result.getVariables().get("pack.fileCount"));
+        assertTrue(result.getVariables().get("pack.zipFile") instanceof FileReference);
+
+        String names = (String) result.getVariables().get("pack.fileNames");
+        assertTrue(names.contains("report.pdf"));
+        assertTrue(names.contains("data.csv"));
+
+        FileReference zipRef = (FileReference) result.getVariables().get("pack.zipFile");
+        byte[] zipBytes = fileStorageService.download(zipRef.getFileId());
+        assertTrue(zipBytes.length > 0);
+
+        try {
+            Map<String, byte[]> entries = unzip(zipBytes);
+            assertEquals(2, entries.size());
+            assertTrue(entries.containsKey("report.pdf"));
+            assertTrue(entries.containsKey("data.csv"));
+            assertEquals("PDF-CONTENT-HERE", new String(entries.get("report.pdf")));
+            assertEquals("id,name\n1,Alice\n2,Bob", new String(entries.get("data.csv")));
+        } catch (IOException e) {
+            fail("Failed to read ZIP: " + e.getMessage());
+        }
+    }
+
+    @Test
+    void fileAggregate_withPrevNodeOutputFiles() {
+        engine.registerHandler(fileProducerHandler("generate_report"));
+        engine.registerHandler(fileProducerHandler("generate_receipt"));
+
+        String json = """
+                { "version": "2.0", "id": "fa2", "name": "FA2",
+                  "nodes": [
+                    { "id": "s", "type": "start", "name": "S" },
+                    { "id": "gen1", "type": "generate_report", "name": "Gen Report",
+                      "prevNodes": ["s"],
+                      "inputMappings": [{ "name": "content", "source": "Report Data", "dataType": "STRING" }] },
+                    { "id": "gen2", "type": "generate_receipt", "name": "Gen Receipt",
+                      "prevNodes": ["s"],
+                      "inputMappings": [{ "name": "content", "source": "Receipt Data", "dataType": "STRING" }] },
+                    { "id": "pack", "type": "file_aggregate", "name": "Pack All",
+                      "prevNodes": ["gen1", "gen2"],
+                      "inputMappings": [
+                        { "name": "report",  "source": "${gen1.outputFile}", "dataType": "FILE" },
+                        { "name": "receipt", "source": "${gen2.outputFile}", "dataType": "FILE" }
+                      ] },
+                    { "id": "e", "type": "end", "name": "E", "prevNodes": ["pack"],
+                      "properties": { "returnValues": {
+                        "zipFile": "${pack.zipFile}",
+                        "count":   "${pack.fileCount}"
+                      } } }
+                  ] }
+                """;
+        FlowResult result = engine.execute(engine.parse(json));
+
+        assertTrue(result.isSuccess());
+        assertTrue(result.getReturnValues().get("zipFile") instanceof FileReference);
+
+        FileReference zipRef = (FileReference) result.getReturnValues().get("zipFile");
+        byte[] zipBytes = fileStorageService.download(zipRef.getFileId());
+        try {
+            Map<String, byte[]> entries = unzip(zipBytes);
+            assertEquals(2, entries.size());
+        } catch (IOException e) {
+            fail("Failed to read ZIP: " + e.getMessage());
+        }
+    }
+
+    @Test
+    void fileAggregate_deduplicatesSameFileName() {
+        seedFile("fa", "data.txt", "text/plain", "AAA");
+        seedFile("fb", "data.txt", "text/plain", "BBB");
+
+        String json = """
+                { "version": "2.0", "id": "fa3", "name": "FA3", "startNodeId": "s",
+                  "nodes": [
+                    { "id": "s", "type": "start", "name": "S", "next": "pack" },
+                    { "id": "pack", "type": "file_aggregate", "name": "Pack",
+                      "inputMappings": [
+                        { "name": "a", "source": "file:fa", "dataType": "FILE" },
+                        { "name": "b", "source": "file:fb", "dataType": "FILE" }
+                      ], "next": "e" },
+                    { "id": "e", "type": "end", "name": "E" }
+                  ] }
+                """;
+        FlowResult result = engine.execute(engine.parse(json));
+
+        assertTrue(result.isSuccess());
+        FileReference zipRef = (FileReference) result.getVariables().get("pack.zipFile");
+        byte[] zipBytes = fileStorageService.download(zipRef.getFileId());
+        try {
+            Map<String, byte[]> entries = unzip(zipBytes);
+            assertEquals(2, entries.size());
+            assertTrue(entries.containsKey("data.txt"));
+            assertTrue(entries.containsKey("data_2.txt"));
+        } catch (IOException e) {
+            fail("Failed to read ZIP: " + e.getMessage());
+        }
+    }
+
+    @Test
+    void fileAggregate_inFullFlow_withSwitch() {
+        seedFile("doc-a", "report.pdf", "application/pdf", "PDF content");
+        seedFile("doc-b", "image.png", "image/png", "PNG content");
+
+        String json = """
+                { "version": "2.0", "id": "fa4", "name": "FA4", "startNodeId": "s",
+                  "nodes": [
+                    { "id": "s", "type": "start", "name": "S", "next": "sw" },
+                    { "id": "sw", "type": "switch", "name": "Check",
+                      "properties": { "expression": "mode" },
+                      "branches": [
+                        { "condition": "== FULL", "target": "packAll" },
+                        { "condition": "== LITE", "target": "packLite" }
+                      ] },
+                    { "id": "packAll", "type": "file_aggregate", "name": "Pack All",
+                      "inputMappings": [
+                        { "name": "a", "source": "file:doc-a", "dataType": "FILE" },
+                        { "name": "b", "source": "file:doc-b", "dataType": "FILE" }
+                      ], "next": "e" },
+                    { "id": "packLite", "type": "file_aggregate", "name": "Pack Lite",
+                      "inputMappings": [
+                        { "name": "a", "source": "file:doc-a", "dataType": "FILE" }
+                      ], "next": "e" },
+                    { "id": "e", "type": "end", "name": "E",
+                      "properties": { "returnValues": { "count": "${packAll.fileCount}" } } }
+                  ] }
+                """;
+        FlowContext ctx = new FlowContext("fa4");
+        ctx.setVariable("mode", "FULL");
+
+        FlowResult result = engine.execute(engine.parse(json), ctx);
+        assertTrue(result.isSuccess());
+        assertEquals(2, result.getVariables().get("packAll.fileCount"));
+    }
+
+    // ======================================================================
     // Helper: inline capability handler for tests
     // ======================================================================
+
+    private NodeHandler fileProducerHandler(String type) {
+        return new NodeHandler() {
+            @Override public String getType() { return type; }
+            @Override public HandleResult execute(FlowNode node, FlowContext context) {
+                String content = (String) context.getResolvedInputs().getOrDefault("content", "default");
+                FileReference ref = fileStorageService.upload(
+                        node.getId() + ".txt", "text/plain", content.getBytes());
+                return HandleResult.output(NodeOutput.builder()
+                        .addFile("outputFile", ref)
+                        .addString("result", "DONE")
+                        .build());
+            }
+        };
+    }
 
     private static NodeHandler capabilityHandler(String type) {
         return new NodeHandler() {
