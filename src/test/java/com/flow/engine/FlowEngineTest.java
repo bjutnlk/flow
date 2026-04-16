@@ -453,6 +453,161 @@ class FlowEngineTest {
     }
 
     // ======================================================================
+    // Retry: resume from failed node
+    // ======================================================================
+
+    @Test
+    void retry_skipsSucceededNodes_reExecutesFailed() {
+        engine.registerHandler(capabilityHandler("work"));
+
+        String json = """
+                { "version": "2.0", "id": "retry1", "name": "Retry1", "startNodeId": "s",
+                  "nodes": [
+                    { "id": "s", "type": "start", "name": "S",
+                      "status": "SUCCESS",
+                      "properties": { "x": 1 },
+                      "next": "a" },
+                    { "id": "a", "type": "work", "name": "A",
+                      "status": "SUCCESS",
+                      "outputData": { "result": "A-DONE", "fileId": "f-123" },
+                      "inputMappings": [{ "name": "in", "source": "${x}", "dataType": "STRING" }],
+                      "next": "b" },
+                    { "id": "b", "type": "work", "name": "B",
+                      "status": "FAILED",
+                      "errorMessage": "timeout",
+                      "inputMappings": [{ "name": "in", "source": "${a.result}", "dataType": "STRING" }],
+                      "next": "e" },
+                    { "id": "e", "type": "end", "name": "E",
+                      "properties": { "returnValues": { "bResult": "${b.result}" } } }
+                  ] }
+                """;
+        FlowResult result = engine.execute(engine.parse(json));
+
+        assertTrue(result.isSuccess());
+        assertEquals("DONE", result.getReturnValues().get("bResult"));
+
+        assertEquals("A-DONE", result.getVariables().get("a.result"));
+        assertEquals("f-123", result.getVariables().get("a.fileId"));
+
+        assertFalse(result.getExecutionTrace().contains("s"), "start was SUCCESS, should be skipped");
+        assertFalse(result.getExecutionTrace().contains("a"), "node a was SUCCESS, should be skipped");
+        assertTrue(result.getExecutionTrace().contains("b"), "node b was FAILED, should re-execute");
+        assertTrue(result.getExecutionTrace().contains("e"), "end should execute");
+    }
+
+    @Test
+    void retry_restoredOutputUsableByDownstream() {
+        engine.registerHandler(capabilityHandler("work"));
+
+        String json = """
+                { "version": "2.0", "id": "retry2", "name": "Retry2", "startNodeId": "s",
+                  "nodes": [
+                    { "id": "s", "type": "start", "name": "S",
+                      "status": "SUCCESS", "next": "a" },
+                    { "id": "a", "type": "work", "name": "A",
+                      "status": "SUCCESS",
+                      "outputData": { "result": "VALUE-FROM-A" },
+                      "next": "sw" },
+                    { "id": "sw", "type": "switch", "name": "Sw",
+                      "status": "FAILED",
+                      "properties": { "expression": "a.result" },
+                      "branches": [
+                        { "condition": "== VALUE-FROM-A", "target": "ok" }
+                      ], "next": "fail" },
+                    { "id": "ok",   "type": "start", "name": "OK",   "properties": { "r": "ok" },   "next": "e" },
+                    { "id": "fail", "type": "start", "name": "Fail", "properties": { "r": "fail" }, "next": "e" },
+                    { "id": "e", "type": "end", "name": "E",
+                      "properties": { "returnValues": { "result": "${r}" } } }
+                  ] }
+                """;
+        FlowResult result = engine.execute(engine.parse(json));
+
+        assertTrue(result.isSuccess());
+        assertEquals("ok", result.getReturnValues().get("result"));
+    }
+
+    @Test
+    void retry_forkJoin_partialRestore() {
+        engine.registerHandler(capabilityHandler("work"));
+
+        String json = """
+                { "version": "2.0", "id": "retry3", "name": "Retry3",
+                  "nodes": [
+                    { "id": "s", "type": "start", "name": "S",
+                      "status": "SUCCESS" },
+                    { "id": "b", "type": "work", "name": "B",
+                      "prevNodes": ["s"],
+                      "status": "SUCCESS",
+                      "outputData": { "result": "B-OK" },
+                      "inputMappings": [{ "name": "x", "source": "1", "dataType": "STRING" }] },
+                    { "id": "d", "type": "work", "name": "D",
+                      "prevNodes": ["s"],
+                      "status": "FAILED",
+                      "inputMappings": [{ "name": "x", "source": "2", "dataType": "STRING" }] },
+                    { "id": "e", "type": "end", "name": "E",
+                      "prevNodes": ["b", "d"],
+                      "properties": { "returnValues": {
+                        "bResult": "${b.result}",
+                        "dResult": "${d.result}"
+                      } } }
+                  ] }
+                """;
+        FlowResult result = engine.execute(engine.parse(json));
+
+        assertTrue(result.isSuccess());
+        assertEquals("B-OK", result.getReturnValues().get("bResult"));
+        assertEquals("DONE", result.getReturnValues().get("dResult"));
+
+        assertFalse(result.getExecutionTrace().contains("b"), "b was SUCCESS, skipped");
+        assertTrue(result.getExecutionTrace().contains("d"), "d was FAILED, re-executed");
+    }
+
+    @Test
+    void firstExecution_noStatusFields_runsNormally() {
+        engine.registerHandler(capabilityHandler("work"));
+
+        String json = """
+                { "version": "2.0", "id": "first", "name": "First", "startNodeId": "s",
+                  "nodes": [
+                    { "id": "s", "type": "start", "name": "S", "next": "a" },
+                    { "id": "a", "type": "work", "name": "A",
+                      "inputMappings": [{ "name": "x", "source": "v", "dataType": "STRING" }],
+                      "next": "e" },
+                    { "id": "e", "type": "end", "name": "E",
+                      "properties": { "returnValues": { "r": "${a.result}" } } }
+                  ] }
+                """;
+        FlowResult result = engine.execute(engine.parse(json));
+
+        assertTrue(result.isSuccess());
+        assertEquals("DONE", result.getReturnValues().get("r"));
+        assertEquals(List.of("s", "a", "e"), result.getExecutionTrace());
+    }
+
+    @Test
+    void recording_tracksSkippedNodes() {
+        engine.registerHandler(capabilityHandler("work"));
+
+        String json = """
+                { "version": "2.0", "id": "rec-retry", "name": "RecRetry", "startNodeId": "s",
+                  "nodes": [
+                    { "id": "s", "type": "start", "name": "S", "status": "SUCCESS", "next": "a" },
+                    { "id": "a", "type": "work", "name": "A", "status": "SUCCESS",
+                      "outputData": { "result": "OK" }, "next": "e" },
+                    { "id": "e", "type": "end", "name": "E" }
+                  ] }
+                """;
+        FlowResult result = engine.execute(engine.parse(json));
+        assertTrue(result.isSuccess());
+
+        ExecutionLog log = recorder.getExecutionLog(result.getExecutionId());
+        long skipped = log.getNodeExecutionLogs().stream()
+                .filter(n -> n.getStatus() == NodeExecutionLog.Status.SKIPPED)
+                .count();
+        assertEquals(2, skipped, "s and a should be SKIPPED in the log");
+    }
+
+    // ======================================================================
     // file_aggregate capability node
     // ======================================================================
 

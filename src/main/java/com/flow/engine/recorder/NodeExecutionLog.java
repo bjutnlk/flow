@@ -53,6 +53,12 @@ public class NodeExecutionLog {
         this.errorMessage = errorMessage;
     }
 
+    public void markSkipped() {
+        this.status = Status.SKIPPED;
+        this.endTime = this.startTime;
+        this.durationMs = 0;
+    }
+
     // ---- getters ----
 
     public String getNodeId() {

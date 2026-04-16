@@ -10,23 +10,15 @@ import java.util.*;
 /**
  * A single executable node within a flow definition.
  *
- * <h3>Graph topology in JSON</h3>
- * <p>Each node declares its predecessors via {@code prevNodes}:
- * <pre>{@code
- * { "id": "c", "prevNodes": ["b", "d"], ... }
- * }</pre>
- * This means node c comes after both b and d.
- *
- * <p>During {@link FlowDefinition#resolve()}, the engine automatically
- * computes:
+ * <h3>Retry support</h3>
+ * <p>When retrying a failed flow, each node in the JSON may carry
+ * {@code status} and {@code outputData} from the previous run:
  * <ul>
- *   <li>{@code next} — forward links (derived from other nodes' prevNodes)</li>
- *   <li>{@code waitFor} — set to prevNodes when a node has 2+ predecessors
- *       (join/converge point)</li>
+ *   <li>{@code status: "SUCCESS"} + {@code outputData: {...}} — node
+ *       already succeeded; engine skips re-execution and restores output</li>
+ *   <li>{@code status: "FAILED"} — node failed; engine re-executes it</li>
+ *   <li>no status — node not yet reached; engine executes normally</li>
  * </ul>
- *
- * <p>{@code next} can also be set explicitly in JSON for backward
- * compatibility or for fork scenarios ({@code "next": ["b", "d"]}).
  */
 public class FlowNode {
 
@@ -34,21 +26,9 @@ public class FlowNode {
     private String type;
     private String name;
 
-    /**
-     * Declared in JSON: which nodes come before this one.
-     * The engine uses this to build the forward graph.
-     */
     private List<String> prevNodes;
-
-    /**
-     * Computed (or explicit in JSON): which nodes come after this one.
-     */
     private List<String> next;
 
-    /**
-     * Computed: node ids that must all complete before this node runs.
-     * Auto-set when a node has multiple prevNodes.
-     */
     @JsonIgnore
     private List<String> waitFor;
 
@@ -58,45 +38,41 @@ public class FlowNode {
     private List<OutputMapping> outputMappings;
     private String body;
 
-    public String getId() {
-        return id;
-    }
+    /**
+     * Execution status from previous run (for retry).
+     * Null on first execution; "SUCCESS", "FAILED", etc. on retry.
+     */
+    private String status;
 
-    public void setId(String id) {
-        this.id = id;
-    }
+    /**
+     * Output data from previous successful execution (for retry).
+     * When {@code status == "SUCCESS"}, the engine restores this
+     * into the context instead of re-executing the handler.
+     */
+    private Map<String, Object> outputData;
 
-    public String getType() {
-        return type;
-    }
+    /**
+     * Error message from previous failed execution (for retry).
+     */
+    private String errorMessage;
 
-    public void setType(String type) {
-        this.type = type;
-    }
+    public String getId() { return id; }
+    public void setId(String id) { this.id = id; }
 
-    public String getName() {
-        return name;
-    }
+    public String getType() { return type; }
+    public void setType(String type) { this.type = type; }
 
-    public void setName(String name) {
-        this.name = name;
-    }
+    public String getName() { return name; }
+    public void setName(String name) { this.name = name; }
 
-    // ---- prevNodes (from JSON) ----
+    // ---- prevNodes ----
 
-    public List<String> getPrevNodes() {
-        return prevNodes;
-    }
+    public List<String> getPrevNodes() { return prevNodes; }
+    public void setPrevNodes(List<String> prevNodes) { this.prevNodes = prevNodes; }
 
-    public void setPrevNodes(List<String> prevNodes) {
-        this.prevNodes = prevNodes;
-    }
+    // ---- next ----
 
-    // ---- next (computed or explicit) ----
-
-    public List<String> getNext() {
-        return next;
-    }
+    public List<String> getNext() { return next; }
 
     @JsonSetter("next")
     public void setNextFromJson(JsonNode jsonNode) {
@@ -110,9 +86,7 @@ public class FlowNode {
         }
     }
 
-    public void setNext(List<String> next) {
-        this.next = next;
-    }
+    public void setNext(List<String> next) { this.next = next; }
 
     public String getFirstNext() {
         return next != null && !next.isEmpty() ? next.get(0) : null;
@@ -122,73 +96,54 @@ public class FlowNode {
         return next != null && next.size() > 1;
     }
 
-    /**
-     * Add a forward link (used by resolve to build next from prevNodes).
-     */
     public void addNext(String nodeId) {
-        if (this.next == null) {
-            this.next = new ArrayList<>();
-        }
-        if (!this.next.contains(nodeId)) {
-            this.next.add(nodeId);
-        }
+        if (this.next == null) this.next = new ArrayList<>();
+        if (!this.next.contains(nodeId)) this.next.add(nodeId);
     }
 
-    // ---- waitFor (computed) ----
+    // ---- waitFor ----
 
-    public List<String> getWaitFor() {
-        return waitFor;
+    public List<String> getWaitFor() { return waitFor; }
+    public void setWaitFor(List<String> waitFor) { this.waitFor = waitFor; }
+    public boolean isJoin() { return waitFor != null && !waitFor.isEmpty(); }
+
+    // ---- retry fields ----
+
+    public String getStatus() { return status; }
+    public void setStatus(String status) { this.status = status; }
+
+    public Map<String, Object> getOutputData() { return outputData; }
+    public void setOutputData(Map<String, Object> outputData) { this.outputData = outputData; }
+
+    public String getErrorMessage() { return errorMessage; }
+    public void setErrorMessage(String errorMessage) { this.errorMessage = errorMessage; }
+
+    @JsonIgnore
+    public boolean isAlreadySucceeded() {
+        return "SUCCESS".equalsIgnoreCase(status);
     }
 
-    public void setWaitFor(List<String> waitFor) {
-        this.waitFor = waitFor;
-    }
-
-    public boolean isJoin() {
-        return waitFor != null && !waitFor.isEmpty();
+    @JsonIgnore
+    public boolean needsExecution() {
+        return !isAlreadySucceeded();
     }
 
     // ---- other fields ----
 
-    public Map<String, Object> getProperties() {
-        return properties;
-    }
+    public Map<String, Object> getProperties() { return properties; }
+    public void setProperties(Map<String, Object> properties) { this.properties = properties; }
 
-    public void setProperties(Map<String, Object> properties) {
-        this.properties = properties;
-    }
+    public List<Branch> getBranches() { return branches; }
+    public void setBranches(List<Branch> branches) { this.branches = branches; }
 
-    public List<Branch> getBranches() {
-        return branches;
-    }
+    public List<InputMapping> getInputMappings() { return inputMappings; }
+    public void setInputMappings(List<InputMapping> inputMappings) { this.inputMappings = inputMappings; }
 
-    public void setBranches(List<Branch> branches) {
-        this.branches = branches;
-    }
+    public List<OutputMapping> getOutputMappings() { return outputMappings; }
+    public void setOutputMappings(List<OutputMapping> outputMappings) { this.outputMappings = outputMappings; }
 
-    public List<InputMapping> getInputMappings() {
-        return inputMappings;
-    }
-
-    public void setInputMappings(List<InputMapping> inputMappings) {
-        this.inputMappings = inputMappings;
-    }
-
-    public List<OutputMapping> getOutputMappings() {
-        return outputMappings;
-    }
-
-    public void setOutputMappings(List<OutputMapping> outputMappings) {
-        this.outputMappings = outputMappings;
-    }
-
-    public String getBody() {
-        return body;
-    }
-
-    public void setBody(String body) {
-        this.body = body;
-    }
+    public String getBody() { return body; }
+    public void setBody(String body) { this.body = body; }
 
     public static class Branch {
         private String condition;
@@ -196,20 +151,9 @@ public class FlowNode {
         @JsonProperty("target")
         private String targetNodeId;
 
-        public String getCondition() {
-            return condition;
-        }
-
-        public void setCondition(String condition) {
-            this.condition = condition;
-        }
-
-        public String getTargetNodeId() {
-            return targetNodeId;
-        }
-
-        public void setTargetNodeId(String targetNodeId) {
-            this.targetNodeId = targetNodeId;
-        }
+        public String getCondition() { return condition; }
+        public void setCondition(String condition) { this.condition = condition; }
+        public String getTargetNodeId() { return targetNodeId; }
+        public void setTargetNodeId(String targetNodeId) { this.targetNodeId = targetNodeId; }
     }
 }

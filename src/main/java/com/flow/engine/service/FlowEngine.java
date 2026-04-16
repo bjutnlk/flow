@@ -22,16 +22,13 @@ import java.util.Collections;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Core flow execution engine (Spring {@code @Service} bean).
+ * Core flow execution engine.
  *
- * <h3>Pre-execution validation</h3>
- * <p>{@link FlowValidator#validate} is called before every execution,
- * checking version, start/end nodes, broken references, reachability,
- * and cycles — all at once, all errors returned together.
- *
- * <h3>DAG execution</h3>
- * <p>Supports linear chains, fork ({@code next: ["b","d"]}), and join
- * ({@code waitFor} auto-computed from prevNodes with 2+ predecessors).
+ * <h3>Retry support</h3>
+ * <p>When retrying a failed flow, pass a JSON where previously succeeded
+ * nodes carry {@code "status": "SUCCESS"} and {@code "outputData": {...}}.
+ * The engine skips those nodes (restores their output into context) and
+ * re-executes from the failed/pending nodes onward.
  */
 @Service
 public class FlowEngine {
@@ -85,7 +82,7 @@ public class FlowEngine {
         }
     }
 
-    // ---- version comparison (static utility) --------------------------------
+    // ---- version comparison -------------------------------------------------
 
     public static int compareVersions(String a, String b) {
         String[] aParts = a.split("\\.");
@@ -111,7 +108,6 @@ public class FlowEngine {
     }
 
     public FlowResult execute(FlowDefinition definition, FlowContext context) {
-        // Pre-execution validation: version, structure, cycles, reachability
         flowValidator.validate(definition);
 
         Map<String, FlowNode> nodeMap = definition.toNodeMap();
@@ -122,9 +118,12 @@ public class FlowEngine {
         ExecutionLog executionLog = new ExecutionLog(
                 definition.getId(), definition.getName(), definition.getVersion());
 
-        log.info("▶ Starting flow '{}' v{} (executionId={}, start node: '{}')",
+        // Restore previously succeeded nodes from JSON (for retry)
+        restoreSucceededNodes(nodeMap, context, completedNodes, executionLog);
+
+        log.info("▶ Starting flow '{}' v{} (executionId={}, restored={} node(s))",
                 definition.getId(), definition.getVersion(),
-                executionLog.getExecutionId(), definition.getStartNodeId());
+                executionLog.getExecutionId(), completedNodes.size());
 
         readyQueue.add(definition.getStartNodeId());
         int steps = 0;
@@ -134,6 +133,10 @@ public class FlowEngine {
                 String currentNodeId = readyQueue.poll();
 
                 if (completedNodes.contains(currentNodeId)) {
+                    FlowNode doneNode = nodeMap.get(currentNodeId);
+                    if (doneNode != null) {
+                        enqueueSuccessors(doneNode, null, readyQueue);
+                    }
                     continue;
                 }
 
@@ -183,15 +186,7 @@ public class FlowEngine {
                     nodeLog.markSuccess(outputSnapshot);
                     completedNodes.add(currentNodeId);
 
-                    if (result.hasExplicitRoute()) {
-                        readyQueue.add(result.getNextNodeId());
-                    } else if (node.getNext() != null) {
-                        for (String nxt : node.getNext()) {
-                            if (!completedNodes.contains(nxt)) {
-                                readyQueue.add(nxt);
-                            }
-                        }
-                    }
+                    enqueueSuccessors(node, result, readyQueue);
 
                 } catch (Exception e) {
                     nodeLog.markFailed(e.getMessage());
@@ -245,6 +240,55 @@ public class FlowEngine {
     }
 
     // ---- internal -----------------------------------------------------------
+
+    /**
+     * On retry: scan all nodes for status=SUCCESS, restore their outputData
+     * into the context so downstream nodes can reference them via ${nodeId.field}.
+     */
+    private void restoreSucceededNodes(Map<String, FlowNode> nodeMap,
+                                       FlowContext context,
+                                       Set<String> completedNodes,
+                                       ExecutionLog executionLog) {
+        for (FlowNode node : nodeMap.values()) {
+            if (!node.isAlreadySucceeded()) {
+                continue;
+            }
+
+            String nodeId = node.getId();
+            completedNodes.add(nodeId);
+
+            if (node.getOutputData() != null && !node.getOutputData().isEmpty()) {
+                NodeOutput.Builder builder = NodeOutput.builder();
+                node.getOutputData().forEach((k, v) -> {
+                    builder.add(k, NodeOutput.DataType.STRING, v);
+                    context.setVariable(nodeId + "." + k, v);
+                });
+                NodeOutput output = builder.build();
+                context.setNodeOutput(nodeId, output);
+            }
+
+            if (node.getProperties() != null) {
+                node.getProperties().forEach(context::setVariable);
+            }
+
+            NodeExecutionLog nodeLog = new NodeExecutionLog(
+                    nodeId, node.getType(), node.getName(), 0);
+            nodeLog.markSkipped();
+            executionLog.addNodeLog(nodeLog);
+
+            log.debug("Restored succeeded node '{}' with outputData: {}",
+                    nodeId, node.getOutputData());
+        }
+    }
+
+    private void enqueueSuccessors(FlowNode node, HandleResult result,
+                                   Deque<String> readyQueue) {
+        if (result != null && result.hasExplicitRoute()) {
+            readyQueue.add(result.getNextNodeId());
+        } else if (node.getNext() != null) {
+            readyQueue.addAll(node.getNext());
+        }
+    }
 
     private void resolveInputs(FlowNode node, FlowContext context) {
         List<InputMapping> mappings = node.getInputMappings();
