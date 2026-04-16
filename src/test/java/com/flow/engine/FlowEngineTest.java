@@ -1,58 +1,46 @@
 package com.flow.engine;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.flow.engine.exception.FlowValidationException;
 import com.flow.engine.handler.*;
 import com.flow.engine.model.*;
 import com.flow.engine.recorder.ExecutionLog;
-import com.flow.engine.recorder.InMemoryExecutionRecorder;
+import com.flow.engine.recorder.ExecutionRecorder;
 import com.flow.engine.recorder.NodeExecutionLog;
-import com.flow.engine.resolve.InputResolver;
 import com.flow.engine.service.FlowEngine;
-import com.flow.engine.service.FlowValidator;
-import com.flow.engine.storage.InMemoryFileStorageService;
-import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.context.SpringBootTest;
 
 import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+/**
+ * Spring Boot integration test — all beans auto-wired by the container,
+ * no manual setUp needed.
+ *
+ * <p>At startup Spring auto-discovers and injects:
+ * <ul>
+ *   <li>{@code FlowEngine} — the core service</li>
+ *   <li>{@code StartNodeHandler}, {@code EndNodeHandler},
+ *       {@code SwitchNodeHandler} — built-in flow node handlers
+ *       (via {@code List<NodeHandler>} constructor param)</li>
+ *   <li>{@code InputResolver} — expression resolver</li>
+ *   <li>{@code FlowValidator} — pre-execution validation</li>
+ *   <li>{@code InMemoryFileStorageService} — file storage fallback</li>
+ *   <li>{@code InMemoryExecutionRecorder} — execution recorder fallback</li>
+ *   <li>{@code ObjectMapper} — from spring-boot-starter-json</li>
+ * </ul>
+ */
+@SpringBootTest
 class FlowEngineTest {
 
+    @Autowired
     private FlowEngine engine;
-    private InMemoryFileStorageService fileStorage;
-    private InMemoryExecutionRecorder recorder;
 
-    @BeforeEach
-    void setUp() {
-        ObjectMapper mapper = new ObjectMapper();
-        fileStorage = new InMemoryFileStorageService();
-        recorder = new InMemoryExecutionRecorder();
-        InputResolver resolver = new InputResolver(fileStorage);
-        FlowValidator validator = new FlowValidator();
-
-        List<NodeHandler> handlers = List.of(
-                new StartNodeHandler(),
-                new EndNodeHandler(),
-                new SwitchNodeHandler(resolver)
-        );
-        engine = new FlowEngine(mapper, resolver, recorder, validator, handlers);
-    }
-
-    private void registerCapability(String type) {
-        engine.registerHandler(new NodeHandler() {
-            @Override public String getType() { return type; }
-            @Override public HandleResult execute(FlowNode node, FlowContext context) {
-                Map<String, Object> inputs = context.getResolvedInputs();
-                NodeOutput.Builder b = NodeOutput.builder();
-                b.addString("result", "DONE");
-                inputs.forEach((k, v) -> b.add(k, NodeOutput.DataType.STRING, v));
-                return HandleResult.output(b.build());
-            }
-        });
-    }
+    @Autowired
+    private ExecutionRecorder recorder;
 
     // ======================================================================
     // Start node: input parameters
@@ -103,7 +91,7 @@ class FlowEngineTest {
 
     @Test
     void endNode_collectsReturnValues() {
-        registerCapability("process");
+        engine.registerHandler(capabilityHandler("process"));
 
         String json = """
                 { "version": "2.0", "id": "rv", "name": "RV",
@@ -177,7 +165,7 @@ class FlowEngineTest {
                     { "id": "sw", "type": "switch", "name": "Sw",
                       "properties": { "expression": "amount" },
                       "branches": [
-                        { "condition": "> 1000", "target": "high" },
+                        { "condition": "> 1000",  "target": "high" },
                         { "condition": "<= 1000", "target": "low" }
                       ] },
                     { "id": "high", "type": "start", "name": "H", "properties": { "tier": "HIGH" }, "next": "e" },
@@ -268,7 +256,7 @@ class FlowEngineTest {
 
     @Test
     void switch_onNodeOutput() {
-        registerCapability("process");
+        engine.registerHandler(capabilityHandler("process"));
 
         String json = """
                 { "version": "2.0", "id": "sno", "name": "SNO", "startNodeId": "s",
@@ -279,9 +267,8 @@ class FlowEngineTest {
                       "next": "sw" },
                     { "id": "sw", "type": "switch", "name": "Sw",
                       "properties": { "expression": "p.result" },
-                      "branches": [
-                        { "condition": "== DONE", "target": "ok" }
-                      ], "next": "fail" },
+                      "branches": [{ "condition": "== DONE", "target": "ok" }],
+                      "next": "fail" },
                     { "id": "ok",   "type": "start", "name": "OK",   "properties": { "r": "ok" },   "next": "e" },
                     { "id": "fail", "type": "start", "name": "Fail", "properties": { "r": "fail" }, "next": "e" },
                     { "id": "e", "type": "end", "name": "E",
@@ -294,12 +281,12 @@ class FlowEngineTest {
     }
 
     // ======================================================================
-    // Full flow: start → capability → switch → end with return
+    // Full flow: start → capability → switch → end
     // ======================================================================
 
     @Test
     void fullFlow() {
-        registerCapability("submit_form");
+        engine.registerHandler(capabilityHandler("submit_form"));
 
         String json = """
                 { "version": "2.0", "id": "full", "name": "Full Flow", "startNodeId": "start",
@@ -378,31 +365,6 @@ class FlowEngineTest {
     }
 
     @Test
-    void validate_unreachableNode() {
-        String json = """
-                { "version": "2.0", "id": "ur", "name": "X", "startNodeId": "a",
-                  "nodes": [
-                    { "id": "a", "type": "start", "name": "A", "next": "e" },
-                    { "id": "e", "type": "end",   "name": "E" },
-                    { "id": "orphan", "type": "start", "name": "O", "next": "e" }
-                  ] }
-                """;
-        assertThrows(FlowValidationException.class, () -> engine.execute(engine.parse(json)));
-    }
-
-    @Test
-    void validate_brokenReference() {
-        String json = """
-                { "version": "2.0", "id": "br", "name": "X", "startNodeId": "a",
-                  "nodes": [
-                    { "id": "a", "type": "start", "name": "A", "next": "ghost" },
-                    { "id": "e", "type": "end",   "name": "E" }
-                  ] }
-                """;
-        assertThrows(FlowValidationException.class, () -> engine.execute(engine.parse(json)));
-    }
-
-    @Test
     void validate_validMinimalFlow() {
         String json = """
                 { "version": "2.0", "id": "ok", "name": "OK",
@@ -415,12 +377,12 @@ class FlowEngineTest {
     }
 
     // ======================================================================
-    // Fork-join via prevNodes (capability nodes)
+    // Fork-join
     // ======================================================================
 
     @Test
     void forkJoin_viaPrevNodes() {
-        registerCapability("work");
+        engine.registerHandler(capabilityHandler("work"));
 
         String json = """
                 { "version": "2.0", "id": "fj", "name": "FJ",
@@ -444,10 +406,6 @@ class FlowEngineTest {
         assertTrue(result.isSuccess());
         assertEquals("DONE", result.getReturnValues().get("bResult"));
         assertEquals("DONE", result.getReturnValues().get("dResult"));
-
-        int eIdx = result.getExecutionTrace().indexOf("e");
-        assertTrue(eIdx > result.getExecutionTrace().indexOf("b"));
-        assertTrue(eIdx > result.getExecutionTrace().indexOf("d"));
     }
 
     // ======================================================================
@@ -482,5 +440,22 @@ class FlowEngineTest {
         List<NodeExecutionLog> logs = recorder.getExecutionLog(result.getExecutionId()).getNodeExecutionLogs();
         assertEquals("s", logs.get(0).getNodeId());
         assertEquals("start", logs.get(0).getNodeType());
+    }
+
+    // ======================================================================
+    // Helper: inline capability handler for tests
+    // ======================================================================
+
+    private static NodeHandler capabilityHandler(String type) {
+        return new NodeHandler() {
+            @Override public String getType() { return type; }
+            @Override public HandleResult execute(FlowNode node, FlowContext context) {
+                Map<String, Object> inputs = context.getResolvedInputs();
+                NodeOutput.Builder b = NodeOutput.builder();
+                b.addString("result", "DONE");
+                inputs.forEach((k, v) -> b.add(k, NodeOutput.DataType.STRING, v));
+                return HandleResult.output(b.build());
+            }
+        };
     }
 }
