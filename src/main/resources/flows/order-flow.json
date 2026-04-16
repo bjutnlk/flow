@@ -1,4 +1,5 @@
 {
+  "version": "2.0",
   "id": "order-flow",
   "name": "Order Processing Flow",
   "startNodeId": "start",

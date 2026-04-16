@@ -10,6 +10,7 @@ import java.util.stream.Collectors;
  *
  * <pre>{@code
  * {
+ *   "version": "2.0",
  *   "id": "order-flow",
  *   "name": "Order Processing",
  *   "startNodeId": "validate",
@@ -19,10 +20,19 @@ import java.util.stream.Collectors;
  */
 public class FlowDefinition {
 
+    private String version;
     private String id;
     private String name;
     private String startNodeId;
     private List<FlowNode> nodes;
+
+    public String getVersion() {
+        return version;
+    }
+
+    public void setVersion(String version) {
+        this.version = version;
+    }
 
     public String getId() {
         return id;
@@ -56,9 +66,6 @@ public class FlowDefinition {
         this.nodes = nodes;
     }
 
-    /**
-     * Build a lookup map keyed by node id for O(1) access during execution.
-     */
     public Map<String, FlowNode> toNodeMap() {
         return nodes.stream()
                 .collect(Collectors.toMap(FlowNode::getId, Function.identity()));
