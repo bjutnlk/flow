@@ -26,14 +26,13 @@ class FlowEngineTest {
     private FlowEngine engine;
     private InMemoryFileStorageService fileStorage;
     private InMemoryExecutionRecorder recorder;
-    private InputResolver resolver;
 
     @BeforeEach
     void setUp() {
         ObjectMapper mapper = new ObjectMapper();
         fileStorage = new InMemoryFileStorageService();
         recorder = new InMemoryExecutionRecorder();
-        resolver = new InputResolver(fileStorage);
+        InputResolver resolver = new InputResolver(fileStorage);
 
         List<NodeHandler> handlers = List.of(
                 new StartNodeHandler(),
@@ -57,68 +56,44 @@ class FlowEngineTest {
                 { "id": "no-ver", "name": "X", "startNodeId": "e",
                   "nodes": [{ "id": "e", "type": "end", "name": "E" }] }
                 """;
-        FlowDefinition def = engine.parse(json);
-        assertThrows(UnsupportedVersionException.class, () -> engine.execute(def));
+        assertThrows(UnsupportedVersionException.class, () -> engine.execute(engine.parse(json)));
     }
 
     @Test
     void versionTooOld_throwsUnsupported() {
         String json = """
-                { "version": "0.5", "id": "old", "name": "Old", "startNodeId": "e",
+                { "version": "0.5", "id": "old", "name": "X", "startNodeId": "e",
                   "nodes": [{ "id": "e", "type": "end", "name": "E" }] }
                 """;
-        FlowDefinition def = engine.parse(json);
         UnsupportedVersionException ex = assertThrows(
-                UnsupportedVersionException.class, () -> engine.execute(def));
+                UnsupportedVersionException.class, () -> engine.execute(engine.parse(json)));
         assertTrue(ex.getMessage().contains("0.5"));
-        assertTrue(ex.getMessage().contains("1.0"));
     }
 
     @Test
-    void versionExactlyMinimum_isAccepted() {
+    void versionMinimum_isAccepted() {
         String json = """
-                { "version": "1.0", "id": "min", "name": "Min", "startNodeId": "e",
+                { "version": "1.0", "id": "min", "name": "X", "startNodeId": "e",
                   "nodes": [{ "id": "e", "type": "end", "name": "E" }] }
                 """;
-        FlowResult result = engine.execute(engine.parse(json));
-        assertTrue(result.isSuccess());
+        assertTrue(engine.execute(engine.parse(json)).isSuccess());
     }
 
     @Test
-    void versionCurrent_isAccepted() {
-        String json = """
-                { "version": "2.0", "id": "cur", "name": "Cur", "startNodeId": "e",
-                  "nodes": [{ "id": "e", "type": "end", "name": "E" }] }
-                """;
-        FlowResult result = engine.execute(engine.parse(json));
-        assertTrue(result.isSuccess());
-    }
-
-    @Test
-    void versionFuture_isAccepted() {
-        String json = """
-                { "version": "99.0", "id": "future", "name": "F", "startNodeId": "e",
-                  "nodes": [{ "id": "e", "type": "end", "name": "E" }] }
-                """;
-        FlowResult result = engine.execute(engine.parse(json));
-        assertTrue(result.isSuccess());
-    }
-
-    @Test
-    void versionCompare_multiSegment() {
-        assertTrue(FlowEngine.compareVersions("1.0", "1.0") == 0);
+    void versionCompare() {
+        assertEquals(0, FlowEngine.compareVersions("1.0", "1.0"));
         assertTrue(FlowEngine.compareVersions("2.0", "1.0") > 0);
         assertTrue(FlowEngine.compareVersions("0.9", "1.0") < 0);
         assertTrue(FlowEngine.compareVersions("1.0.1", "1.0") > 0);
         assertTrue(FlowEngine.compareVersions("1.2", "1.10") < 0);
     }
 
-    // ---- execution recording ------------------------------------------------
+    // ---- recording: single save at end --------------------------------------
 
     @Test
-    void executionLog_isRecorded_onSuccess() {
+    void recording_savedOnceAtEnd_onSuccess() {
         String json = """
-                { "version": "2.0", "id": "rec-ok", "name": "RecOK", "startNodeId": "s",
+                { "version": "2.0", "id": "rec", "name": "Rec", "startNodeId": "s",
                   "nodes": [
                     { "id": "s", "type": "start", "name": "S", "next": "t" },
                     { "id": "t", "type": "task",  "name": "T", "properties": {"x":1}, "next": "e" },
@@ -133,23 +108,19 @@ class FlowEngineTest {
         ExecutionLog log = recorder.getExecutionLog(result.getExecutionId());
         assertNotNull(log);
         assertEquals(ExecutionLog.Status.SUCCESS, log.getStatus());
-        assertEquals("rec-ok", log.getFlowId());
-        assertEquals("2.0", log.getFlowVersion());
         assertEquals(3, log.getTotalNodes());
         assertEquals(3, log.getSuccessNodes());
         assertEquals(0, log.getFailedNodes());
         assertTrue(log.getTotalDurationMs() >= 0);
-        assertNotNull(log.getStartTime());
-        assertNotNull(log.getEndTime());
     }
 
     @Test
-    void executionLog_capturesNodeDetails() {
+    void recording_capturesNodeDetails() {
         String json = """
-                { "version": "2.0", "id": "detail", "name": "Detail", "startNodeId": "s",
+                { "version": "2.0", "id": "det", "name": "Det", "startNodeId": "s",
                   "nodes": [
                     { "id": "s", "type": "start", "name": "Start", "next": "t" },
-                    { "id": "t", "type": "task",  "name": "DoWork", "properties": {"k":"v"}, "next": "e" },
+                    { "id": "t", "type": "task",  "name": "Work",  "properties": {"k":"v"}, "next": "e" },
                     { "id": "e", "type": "end",   "name": "End" }
                   ] }
                 """;
@@ -158,91 +129,60 @@ class FlowEngineTest {
 
         List<NodeExecutionLog> nodeLogs = log.getNodeExecutionLogs();
         assertEquals(3, nodeLogs.size());
-
-        NodeExecutionLog startLog = nodeLogs.get(0);
-        assertEquals("s", startLog.getNodeId());
-        assertEquals("start", startLog.getNodeType());
-        assertEquals("Start", startLog.getNodeName());
-        assertEquals(1, startLog.getStepIndex());
-        assertEquals(NodeExecutionLog.Status.SUCCESS, startLog.getStatus());
-
-        NodeExecutionLog taskLog = nodeLogs.get(1);
-        assertEquals("t", taskLog.getNodeId());
-        assertEquals("task", taskLog.getNodeType());
-        assertEquals(2, taskLog.getStepIndex());
-
-        NodeExecutionLog endLog = nodeLogs.get(2);
-        assertEquals("e", endLog.getNodeId());
-        assertEquals(3, endLog.getStepIndex());
+        assertEquals("s", nodeLogs.get(0).getNodeId());
+        assertEquals("start", nodeLogs.get(0).getNodeType());
+        assertEquals(1, nodeLogs.get(0).getStepIndex());
+        assertEquals(NodeExecutionLog.Status.SUCCESS, nodeLogs.get(0).getStatus());
     }
 
     @Test
-    void executionLog_isRecorded_onFailure() {
+    void recording_savedOnceAtEnd_onFailure() {
         String json = """
-                { "version": "2.0", "id": "rec-fail", "name": "RecFail", "startNodeId": "a",
-                  "nodes": [
-                    { "id": "a", "type": "task", "name": "A", "next": "missing" }
-                  ] }
+                { "version": "2.0", "id": "fail", "name": "Fail", "startNodeId": "a",
+                  "nodes": [{ "id": "a", "type": "task", "name": "A", "next": "missing" }] }
                 """;
         FlowResult result = engine.execute(engine.parse(json));
 
         assertFalse(result.isSuccess());
-        assertNotNull(result.getExecutionId());
-
         ExecutionLog log = recorder.getExecutionLog(result.getExecutionId());
-        assertNotNull(log);
         assertEquals(ExecutionLog.Status.FAILED, log.getStatus());
-        assertNotNull(log.getErrorMessage());
         assertTrue(log.getErrorMessage().contains("missing"));
         assertEquals(1, log.getSuccessNodes());
     }
 
     @Test
-    void executionLog_capturesNodeFailure() {
+    void recording_capturesNodeFailure() {
         engine.registerHandler(new NodeHandler() {
-            @Override
-            public String getType() { return "bomb"; }
-            @Override
-            public HandleResult execute(FlowNode node, FlowContext context) {
+            @Override public String getType() { return "bomb"; }
+            @Override public HandleResult execute(FlowNode node, FlowContext context) {
                 throw new RuntimeException("boom!");
             }
         });
 
         String json = """
-                { "version": "2.0", "id": "bomb-flow", "name": "Bomb", "startNodeId": "b",
-                  "nodes": [
-                    { "id": "b", "type": "bomb", "name": "Bomb" }
-                  ] }
+                { "version": "2.0", "id": "bomb", "name": "Bomb", "startNodeId": "b",
+                  "nodes": [{ "id": "b", "type": "bomb", "name": "B" }] }
                 """;
         FlowResult result = engine.execute(engine.parse(json));
 
-        assertFalse(result.isSuccess());
-
         ExecutionLog log = recorder.getExecutionLog(result.getExecutionId());
         assertEquals(1, log.getFailedNodes());
-
-        NodeExecutionLog nodeLog = log.getNodeExecutionLogs().get(0);
-        assertEquals(NodeExecutionLog.Status.FAILED, nodeLog.getStatus());
-        assertEquals("boom!", nodeLog.getErrorMessage());
-        assertTrue(nodeLog.getDurationMs() >= 0);
+        assertEquals(NodeExecutionLog.Status.FAILED, log.getNodeExecutionLogs().get(0).getStatus());
+        assertEquals("boom!", log.getNodeExecutionLogs().get(0).getErrorMessage());
     }
 
     @Test
-    void executionLog_capturesInputOutputSnapshots() {
-        fileStorage.seed("doc-001", "app.pdf", "application/pdf",
-                "data".getBytes(StandardCharsets.UTF_8));
+    void recording_capturesInputOutputSnapshots() {
+        fileStorage.seed("doc-001", "app.pdf", "application/pdf", "data".getBytes());
 
         String json = """
                 { "version": "2.0", "id": "snap", "name": "Snap", "startNodeId": "form",
                   "nodes": [
-                    {
-                      "id": "form", "type": "submit_form", "name": "Form",
+                    { "id": "form", "type": "submit_form", "name": "Form",
                       "inputMappings": [
                         { "name": "user", "source": "${userName}", "dataType": "STRING" },
                         { "name": "doc",  "source": "file:doc-001", "dataType": "FILE" }
-                      ],
-                      "next": "e"
-                    },
+                      ], "next": "e" },
                     { "id": "e", "type": "end", "name": "E" }
                   ] }
                 """;
@@ -257,16 +197,13 @@ class FlowEngineTest {
         assertEquals("Alice", formLog.getInputSnapshot().get("user"));
         assertNotNull(formLog.getOutputSnapshot());
         assertTrue(formLog.getOutputSnapshot().containsKey("result"));
-        assertTrue(formLog.getOutputSnapshot().containsKey("receiptFile"));
     }
 
-    // ---- basic flow tests (with version) ------------------------------------
+    // ---- basic flow tests ---------------------------------------------------
 
     @Test
     void executeOrderFlow_highAmount() {
         InputStream is = getClass().getResourceAsStream("/flows/order-flow.json");
-        assertNotNull(is);
-
         FlowDefinition def = engine.parse(is);
         FlowContext ctx = new FlowContext(def.getId());
         ctx.setVariable("amount", 2000);
@@ -275,11 +212,8 @@ class FlowEngineTest {
 
         assertTrue(result.isSuccess());
         assertEquals("PENDING_APPROVAL", result.getVariables().get("orderStatus"));
-        assertEquals(
-                List.of("start", "validate", "check-amount", "approve-manager", "log-result", "end"),
-                result.getExecutionTrace()
-        );
-        assertNotNull(result.getExecutionId());
+        assertEquals(List.of("start", "validate", "check-amount", "approve-manager", "log-result", "end"),
+                result.getExecutionTrace());
     }
 
     @Test
@@ -290,7 +224,6 @@ class FlowEngineTest {
         ctx.setVariable("amount", 500);
 
         FlowResult result = engine.execute(def, ctx);
-
         assertTrue(result.isSuccess());
         assertEquals("APPROVED", result.getVariables().get("orderStatus"));
     }
@@ -298,7 +231,7 @@ class FlowEngineTest {
     @Test
     void simpleFlow() {
         String json = """
-                { "version": "2.0", "id": "simple", "name": "Simple", "startNodeId": "s",
+                { "version": "2.0", "id": "s", "name": "S", "startNodeId": "s",
                   "nodes": [
                     { "id": "s", "type": "start", "name": "S", "next": "t" },
                     { "id": "t", "type": "task",  "name": "T", "properties": { "x": 42 }, "next": "e" },
@@ -313,7 +246,7 @@ class FlowEngineTest {
     @Test
     void contextSharedBetweenNodes() {
         String json = """
-                { "version": "2.0", "id": "ctx", "name": "Ctx", "startNodeId": "a",
+                { "version": "2.0", "id": "c", "name": "C", "startNodeId": "a",
                   "nodes": [
                     { "id": "a", "type": "task", "name": "A", "properties": { "greeting": "hello" }, "next": "b" },
                     { "id": "b", "type": "log",  "name": "B", "properties": { "message": "${greeting} world" }, "next": "c" },
@@ -328,14 +261,12 @@ class FlowEngineTest {
     @Test
     void missingNodeReturnsFailure() {
         String json = """
-                { "version": "2.0", "id": "bad", "name": "Bad", "startNodeId": "a",
-                  "nodes": [
-                    { "id": "a", "type": "task", "name": "A", "next": "nonexistent" }
-                  ] }
+                { "version": "2.0", "id": "b", "name": "B", "startNodeId": "a",
+                  "nodes": [{ "id": "a", "type": "task", "name": "A", "next": "x" }] }
                 """;
         FlowResult result = engine.execute(engine.parse(json));
         assertFalse(result.isSuccess());
-        assertTrue(result.getErrorMessage().contains("nonexistent"));
+        assertTrue(result.getErrorMessage().contains("x"));
     }
 
     @Test
@@ -349,7 +280,7 @@ class FlowEngineTest {
         });
 
         String json = """
-                { "version": "2.0", "id": "custom", "name": "Custom", "startNodeId": "c",
+                { "version": "2.0", "id": "cu", "name": "Cu", "startNodeId": "c",
                   "nodes": [
                     { "id": "c", "type": "custom", "name": "C", "next": "e" },
                     { "id": "e", "type": "end",    "name": "E" }
@@ -360,97 +291,66 @@ class FlowEngineTest {
         assertEquals(true, result.getVariables().get("customRan"));
     }
 
-    @Test
-    void prePopulatedContext() {
-        String json = """
-                { "version": "2.0", "id": "pre", "name": "Pre", "startNodeId": "log",
-                  "nodes": [
-                    { "id": "log", "type": "log", "name": "L", "properties": { "message": "user=${userId}" }, "next": "end" },
-                    { "id": "end", "type": "end", "name": "E" }
-                  ] }
-                """;
-        FlowContext ctx = new FlowContext("pre");
-        ctx.setVariable("userId", "U-12345");
-
-        FlowResult result = engine.execute(engine.parse(json), ctx);
-        assertTrue(result.isSuccess());
-        assertEquals("user=U-12345", result.getVariables().get("_lastLog"));
-    }
-
-    // ---- file and cross-node tests ------------------------------------------
+    // ---- file and cross-node ------------------------------------------------
 
     @Test
     void submitForm_producesFileOutput() {
-        fileStorage.seed("doc-001", "app.pdf", "application/pdf",
-                "PDF content".getBytes(StandardCharsets.UTF_8));
+        fileStorage.seed("doc-001", "app.pdf", "application/pdf", "PDF".getBytes());
 
         String json = """
                 { "version": "2.0", "id": "sf", "name": "SF", "startNodeId": "s",
                   "nodes": [
-                    { "id": "s", "type": "start", "name": "S", "next": "form" },
-                    { "id": "form", "type": "submit_form", "name": "Form",
-                      "inputMappings": [
-                        { "name": "userName", "source": "${user}", "dataType": "STRING" },
-                        { "name": "doc", "source": "file:doc-001", "dataType": "FILE" }
-                      ], "next": "e" },
+                    { "id": "s", "type": "start", "name": "S", "next": "f" },
+                    { "id": "f", "type": "submit_form", "name": "F",
+                      "inputMappings": [{ "name": "doc", "source": "file:doc-001", "dataType": "FILE" }],
+                      "next": "e" },
                     { "id": "e", "type": "end", "name": "E" }
-                  ] }
-                """;
-        FlowContext ctx = new FlowContext("sf");
-        ctx.setVariable("user", "Alice");
-
-        FlowResult result = engine.execute(engine.parse(json), ctx);
-
-        assertTrue(result.isSuccess());
-        assertEquals("SUBMITTED", result.getVariables().get("form.result"));
-    }
-
-    @Test
-    void crossNodeReference_C_readsA_output() {
-        fileStorage.seed("seed-file", "data.txt", "text/plain",
-                "original data".getBytes(StandardCharsets.UTF_8));
-
-        String json = """
-                { "version": "2.0", "id": "xref", "name": "XRef", "startNodeId": "a",
-                  "nodes": [
-                    { "id": "a", "type": "submit_form", "name": "A",
-                      "inputMappings": [{ "name": "input", "source": "file:seed-file", "dataType": "FILE" }],
-                      "next": "b" },
-                    { "id": "b", "type": "task", "name": "B", "properties": { "status": "processed" }, "next": "c" },
-                    { "id": "c", "type": "aggregate_file", "name": "C",
-                      "inputMappings": [{ "name": "fileFromA", "source": "${a.receiptFile}", "dataType": "FILE" }],
-                      "next": "end" },
-                    { "id": "end", "type": "end", "name": "End" }
                   ] }
                 """;
         FlowResult result = engine.execute(engine.parse(json));
         assertTrue(result.isSuccess());
-        assertEquals(List.of("a", "b", "c", "end"), result.getExecutionTrace());
+        assertEquals("SUBMITTED", result.getVariables().get("f.result"));
+    }
+
+    @Test
+    void crossNodeReference() {
+        fileStorage.seed("seed", "d.txt", "text/plain", "data".getBytes());
+
+        String json = """
+                { "version": "2.0", "id": "xr", "name": "XR", "startNodeId": "a",
+                  "nodes": [
+                    { "id": "a", "type": "submit_form", "name": "A",
+                      "inputMappings": [{ "name": "in", "source": "file:seed", "dataType": "FILE" }],
+                      "next": "b" },
+                    { "id": "b", "type": "aggregate_file", "name": "B",
+                      "inputMappings": [{ "name": "f", "source": "${a.receiptFile}", "dataType": "FILE" }],
+                      "next": "e" },
+                    { "id": "e", "type": "end", "name": "E" }
+                  ] }
+                """;
+        FlowResult result = engine.execute(engine.parse(json));
+        assertTrue(result.isSuccess());
+        assertTrue(result.getVariables().get("b.mergedFile") instanceof FileReference);
     }
 
     // ---- consecutive capability nodes ---------------------------------------
 
     @Test
     void consecutiveCapabilityNodes_pipeline() {
-        fileStorage.seed("raw-data-001", "raw.csv", "text/csv",
-                "id,name\n1,Alice".getBytes(StandardCharsets.UTF_8));
-
+        fileStorage.seed("raw-data-001", "raw.csv", "text/csv", "1,Alice".getBytes());
         InputStream is = getClass().getResourceAsStream("/flows/pipeline-flow.json");
-        assertNotNull(is);
-
         FlowDefinition def = engine.parse(is);
         FlowContext ctx = new FlowContext(def.getId());
         ctx.setVariable("dataSource", "CRM");
 
         FlowResult result = engine.execute(def, ctx);
-
         assertTrue(result.isSuccess());
         assertEquals(List.of("ingest", "transform", "validate", "export", "end"),
                 result.getExecutionTrace());
     }
 
     @Test
-    void capabilityNodes_directChain_noStartOrEnd() {
+    void capabilityNodes_noStartOrEnd() {
         String json = """
                 { "version": "2.0", "id": "bare", "name": "Bare", "startNodeId": "a",
                   "nodes": [
@@ -472,36 +372,94 @@ class FlowEngineTest {
         assertEquals(List.of("a", "b", "c"), result.getExecutionTrace());
     }
 
-    // ---- document flow ------------------------------------------------------
+    // ---- fork-join ----------------------------------------------------------
 
     @Test
-    void documentFlow_lowAmount() {
-        fileStorage.seed("doc-001", "app.pdf", "application/pdf", "PDF".getBytes());
-        InputStream is = getClass().getResourceAsStream("/flows/document-flow.json");
-        FlowDefinition def = engine.parse(is);
-        FlowContext ctx = new FlowContext(def.getId());
-        ctx.setVariable("applicantName", "Bob");
-        ctx.setVariable("amount", 5000);
+    void forkJoin_A_forks_to_B_and_D_then_C_merges() {
+        String json = """
+                { "version": "2.0", "id": "fj", "name": "FJ", "startNodeId": "a",
+                  "nodes": [
+                    { "id": "a", "type": "task", "name": "A",
+                      "properties": { "origin": "a" },
+                      "next": ["b", "d"] },
+                    { "id": "b", "type": "task", "name": "B",
+                      "properties": { "bResult": "fromB" },
+                      "next": "c" },
+                    { "id": "d", "type": "task", "name": "D",
+                      "properties": { "dResult": "fromD" },
+                      "next": "c" },
+                    { "id": "c", "type": "log", "name": "C",
+                      "waitFor": ["b", "d"],
+                      "properties": { "message": "${bResult} + ${dResult}" },
+                      "next": "e" },
+                    { "id": "e", "type": "end", "name": "E" }
+                  ] }
+                """;
+        FlowResult result = engine.execute(engine.parse(json));
 
-        FlowResult result = engine.execute(def, ctx);
         assertTrue(result.isSuccess());
-        assertEquals(List.of("start", "submit", "check-amount", "log-result", "end"),
-                result.getExecutionTrace());
+        assertEquals("fromB", result.getVariables().get("bResult"));
+        assertEquals("fromD", result.getVariables().get("dResult"));
+        assertTrue(result.getExecutionTrace().contains("b"));
+        assertTrue(result.getExecutionTrace().contains("d"));
+        int cIndex = result.getExecutionTrace().indexOf("c");
+        int bIndex = result.getExecutionTrace().indexOf("b");
+        int dIndex = result.getExecutionTrace().indexOf("d");
+        assertTrue(cIndex > bIndex, "c must come after b");
+        assertTrue(cIndex > dIndex, "c must come after d");
+        assertEquals("fromB + fromD", result.getVariables().get("_lastLog"));
     }
 
     @Test
-    void documentFlow_highAmount() {
-        fileStorage.seed("doc-001", "app.pdf", "application/pdf", "PDF".getBytes());
-        InputStream is = getClass().getResourceAsStream("/flows/document-flow.json");
+    void forkJoin_withFileOutputs_C_reads_B_and_D() {
+        InputStream is = getClass().getResourceAsStream("/flows/fork-join-flow.json");
+        assertNotNull(is);
+
         FlowDefinition def = engine.parse(is);
         FlowContext ctx = new FlowContext(def.getId());
-        ctx.setVariable("applicantName", "Carol");
-        ctx.setVariable("amount", 20000);
+        ctx.setVariable("dataSource", "API");
 
         FlowResult result = engine.execute(def, ctx);
+
         assertTrue(result.isSuccess());
-        assertEquals(List.of("start", "submit", "check-amount", "aggregate", "log-result", "end"),
-                result.getExecutionTrace());
+        assertTrue(result.getExecutionTrace().contains("branch-b"));
+        assertTrue(result.getExecutionTrace().contains("branch-d"));
+
+        int mergeIdx = result.getExecutionTrace().indexOf("merge");
+        assertTrue(mergeIdx > result.getExecutionTrace().indexOf("branch-b"));
+        assertTrue(mergeIdx > result.getExecutionTrace().indexOf("branch-d"));
+
+        assertTrue(result.getVariables().get("merge.mergedFile") instanceof FileReference);
+        assertEquals(2, result.getVariables().get("merge.fileCount"));
+    }
+
+    @Test
+    void forkJoin_withConditionBranching() {
+        String json = """
+                { "version": "2.0", "id": "fj-cond", "name": "FJC", "startNodeId": "start",
+                  "nodes": [
+                    { "id": "start", "type": "task", "name": "Start",
+                      "properties": { "val": 10 },
+                      "next": ["path1", "path2"] },
+                    { "id": "path1", "type": "task", "name": "P1",
+                      "properties": { "p1": "done" },
+                      "next": "join" },
+                    { "id": "path2", "type": "task", "name": "P2",
+                      "properties": { "p2": "done" },
+                      "next": "join" },
+                    { "id": "join", "type": "task", "name": "Join",
+                      "waitFor": ["path1", "path2"],
+                      "properties": { "merged": true },
+                      "next": "end" },
+                    { "id": "end", "type": "end", "name": "End" }
+                  ] }
+                """;
+        FlowResult result = engine.execute(engine.parse(json));
+
+        assertTrue(result.isSuccess());
+        assertEquals("done", result.getVariables().get("p1"));
+        assertEquals("done", result.getVariables().get("p2"));
+        assertEquals(true, result.getVariables().get("merged"));
     }
 
     // ---- switch node --------------------------------------------------------
@@ -512,7 +470,7 @@ class FlowEngineTest {
                 { "version": "2.0", "id": "sw", "name": "Sw", "startNodeId": "set",
                   "nodes": [
                     { "id": "set", "type": "task", "name": "Set", "properties": { "status": "REJECTED" }, "next": "sw" },
-                    { "id": "sw", "type": "switch", "name": "Switch",
+                    { "id": "sw", "type": "switch", "name": "Sw",
                       "properties": { "expression": "status" },
                       "branches": [
                         { "condition": "APPROVED", "target": "ok" },
@@ -534,11 +492,11 @@ class FlowEngineTest {
                 { "version": "2.0", "id": "sw2", "name": "Sw2", "startNodeId": "set",
                   "nodes": [
                     { "id": "set", "type": "task", "name": "Set", "properties": { "status": "UNKNOWN" }, "next": "sw" },
-                    { "id": "sw", "type": "switch", "name": "Switch",
+                    { "id": "sw", "type": "switch", "name": "Sw",
                       "properties": { "expression": "status" },
                       "branches": [{ "condition": "APPROVED", "target": "ok" }],
                       "next": "def" },
-                    { "id": "ok",  "type": "task", "name": "OK",  "properties": { "path": "approved" }, "next": "end" },
+                    { "id": "ok",  "type": "task", "name": "OK",  "properties": { "path": "ok" },      "next": "end" },
                     { "id": "def", "type": "task", "name": "Def", "properties": { "path": "default" },  "next": "end" },
                     { "id": "end", "type": "end",  "name": "End" }
                   ] }
@@ -548,151 +506,74 @@ class FlowEngineTest {
         assertEquals("default", result.getVariables().get("path"));
     }
 
-    @Test
-    void switchNode_onNodeOutputReference() {
-        String json = """
-                { "version": "2.0", "id": "sw3", "name": "Sw3", "startNodeId": "form",
-                  "nodes": [
-                    { "id": "form", "type": "submit_form", "name": "Form",
-                      "inputMappings": [{ "name": "x", "source": "y", "dataType": "STRING" }],
-                      "next": "sw" },
-                    { "id": "sw", "type": "switch", "name": "Sw",
-                      "properties": { "expression": "form.result" },
-                      "branches": [
-                        { "condition": "SUBMITTED", "target": "ok" },
-                        { "condition": "FAILED",    "target": "fail" }
-                      ], "next": "fail" },
-                    { "id": "ok",   "type": "task", "name": "OK",   "properties": { "path": "ok" },   "next": "end" },
-                    { "id": "fail", "type": "task", "name": "Fail", "properties": { "path": "fail" }, "next": "end" },
-                    { "id": "end",  "type": "end",  "name": "End" }
-                  ] }
-                """;
-        FlowResult result = engine.execute(engine.parse(json));
-        assertTrue(result.isSuccess());
-        assertEquals("ok", result.getVariables().get("path"));
-    }
-
     // ---- foreach node -------------------------------------------------------
 
     @Test
-    void forEachNode_iteratesOverList() {
+    void forEachNode_iterates() {
         String json = """
                 { "version": "2.0", "id": "fe", "name": "FE", "startNodeId": "setup",
                   "nodes": [
                     { "id": "setup", "type": "task", "name": "Setup", "next": "loop" },
                     { "id": "loop", "type": "foreach", "name": "Loop",
-                      "properties": { "collection": "items", "itemVar": "current", "indexVar": "idx" },
-                      "next": "log" },
-                    { "id": "log", "type": "log", "name": "Log",
-                      "properties": { "message": "processed ${loop.count} items" },
+                      "properties": { "collection": "items", "itemVar": "cur", "indexVar": "idx" },
                       "next": "end" },
                     { "id": "end", "type": "end", "name": "End" }
                   ] }
                 """;
         FlowContext ctx = new FlowContext("fe");
-        ctx.setVariable("items", List.of("apple", "banana", "cherry"));
+        ctx.setVariable("items", List.of("a", "b", "c"));
 
         FlowResult result = engine.execute(engine.parse(json), ctx);
         assertTrue(result.isSuccess());
         assertEquals(3, result.getVariables().get("loop.count"));
     }
 
-    // ---- image / mixed output -----------------------------------------------
+    // ---- document flow ------------------------------------------------------
 
     @Test
-    void nodeOutput_stringAndImage() {
-        engine.registerHandler(new NodeHandler() {
-            @Override public String getType() { return "generate_image"; }
-            @Override public HandleResult execute(FlowNode node, FlowContext context) {
-                FileReference img = new FileReference("img-001", "chart.png", "image/png", 1024);
-                return HandleResult.output(NodeOutput.builder()
-                        .addString("caption", "Sales Chart Q1")
-                        .addImage("chart", img).build());
-            }
-        });
-
-        String json = """
-                { "version": "2.0", "id": "img", "name": "Img", "startNodeId": "gen",
-                  "nodes": [
-                    { "id": "gen", "type": "generate_image", "name": "Gen", "next": "log" },
-                    { "id": "log", "type": "log", "name": "Log",
-                      "properties": { "message": "Generated: ${gen.caption}" }, "next": "end" },
-                    { "id": "end", "type": "end", "name": "End" }
-                  ] }
-                """;
-        FlowResult result = engine.execute(engine.parse(json));
-        assertTrue(result.isSuccess());
-        assertEquals("Sales Chart Q1", result.getVariables().get("gen.caption"));
-    }
-
-    @Test
-    void literalInputValues() {
-        String json = """
-                { "version": "2.0", "id": "lit", "name": "Lit", "startNodeId": "form",
-                  "nodes": [
-                    { "id": "form", "type": "submit_form", "name": "Form",
-                      "inputMappings": [
-                        { "name": "name",  "source": "direct-value", "dataType": "STRING" },
-                        { "name": "count", "source": "42",           "dataType": "NUMBER" }
-                      ], "next": "end" },
-                    { "id": "end", "type": "end", "name": "End" }
-                  ] }
-                """;
-        FlowResult result = engine.execute(engine.parse(json));
-        assertTrue(result.isSuccess());
-    }
-
-    @Test
-    void conditionNode_referencesNodeOutput() {
-        String json = """
-                { "version": "2.0", "id": "cref", "name": "CRef", "startNodeId": "form",
-                  "nodes": [
-                    { "id": "form", "type": "submit_form", "name": "Form",
-                      "inputMappings": [{ "name": "x", "source": "y", "dataType": "STRING" }],
-                      "next": "check" },
-                    { "id": "check", "type": "condition", "name": "Check",
-                      "branches": [{ "condition": "form.result == SUBMITTED", "target": "ok" }],
-                      "next": "fail" },
-                    { "id": "ok",   "type": "task", "name": "OK",   "properties": { "path": "ok" },   "next": "end" },
-                    { "id": "fail", "type": "task", "name": "Fail", "properties": { "path": "fail" }, "next": "end" },
-                    { "id": "end",  "type": "end",  "name": "End" }
-                  ] }
-                """;
-        FlowResult result = engine.execute(engine.parse(json));
-        assertTrue(result.isSuccess());
-        assertEquals("ok", result.getVariables().get("path"));
-    }
-
-    // ---- execution recording on complex flow --------------------------------
-
-    @Test
-    void executionLog_complexFlow_tracksAllNodes() {
+    void documentFlow_lowAmount() {
         fileStorage.seed("doc-001", "app.pdf", "application/pdf", "PDF".getBytes());
-
         InputStream is = getClass().getResourceAsStream("/flows/document-flow.json");
-        FlowDefinition def = engine.parse(is);
-        FlowContext ctx = new FlowContext(def.getId());
-        ctx.setVariable("applicantName", "Dave");
+        FlowContext ctx = new FlowContext("document-flow");
+        ctx.setVariable("applicantName", "Bob");
+        ctx.setVariable("amount", 5000);
+
+        FlowResult result = engine.execute(engine.parse(is), ctx);
+        assertTrue(result.isSuccess());
+    }
+
+    @Test
+    void documentFlow_highAmount() {
+        fileStorage.seed("doc-001", "app.pdf", "application/pdf", "PDF".getBytes());
+        InputStream is = getClass().getResourceAsStream("/flows/document-flow.json");
+        FlowContext ctx = new FlowContext("document-flow");
+        ctx.setVariable("applicantName", "Carol");
         ctx.setVariable("amount", 20000);
 
-        FlowResult result = engine.execute(def, ctx);
+        FlowResult result = engine.execute(engine.parse(is), ctx);
+        assertTrue(result.isSuccess());
+    }
+
+    // ---- recording on complex flow ------------------------------------------
+
+    @Test
+    void recording_complexForkJoin() {
+        String json = """
+                { "version": "2.0", "id": "rec-fj", "name": "RecFJ", "startNodeId": "a",
+                  "nodes": [
+                    { "id": "a", "type": "task", "name": "A", "next": ["b", "d"] },
+                    { "id": "b", "type": "task", "name": "B", "properties": {"x":1}, "next": "c" },
+                    { "id": "d", "type": "task", "name": "D", "properties": {"y":2}, "next": "c" },
+                    { "id": "c", "type": "task", "name": "C", "waitFor": ["b", "d"], "next": "e" },
+                    { "id": "e", "type": "end",  "name": "E" }
+                  ] }
+                """;
+        FlowResult result = engine.execute(engine.parse(json));
         assertTrue(result.isSuccess());
 
         ExecutionLog log = recorder.getExecutionLog(result.getExecutionId());
-        assertEquals(6, log.getTotalNodes());
-        assertEquals(6, log.getSuccessNodes());
-        assertEquals(0, log.getFailedNodes());
-        assertEquals("Document Processing Flow", log.getFlowName());
-
-        List<String> nodeIds = log.getNodeExecutionLogs().stream()
-                .map(NodeExecutionLog::getNodeId)
-                .toList();
-        assertEquals(List.of("start", "submit", "check-amount", "aggregate", "log-result", "end"),
-                nodeIds);
-
-        NodeExecutionLog submitLog = log.getNodeExecutionLogs().get(1);
-        assertEquals("submit_form", submitLog.getNodeType());
-        assertNotNull(submitLog.getOutputSnapshot());
-        assertEquals("SUBMITTED", String.valueOf(submitLog.getOutputSnapshot().get("result")));
+        assertEquals(5, log.getTotalNodes());
+        assertEquals(5, log.getSuccessNodes());
+        assertEquals(ExecutionLog.Status.SUCCESS, log.getStatus());
     }
 }

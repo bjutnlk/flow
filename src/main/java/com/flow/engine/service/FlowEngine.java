@@ -24,23 +24,24 @@ import java.util.concurrent.ConcurrentHashMap;
 /**
  * Core flow execution engine (Spring {@code @Service} bean).
  *
- * <p>Execution lifecycle:
- * <ol>
- *   <li><b>Version check</b> — rejects flow definitions whose version
- *       is below {@link #MIN_VERSION}.</li>
- *   <li><b>Record flow start</b> — creates an {@link ExecutionLog}.</li>
- *   <li>For each node:
- *     <ol>
- *       <li>Record node start → resolve inputs → execute handler →
- *           store output → record node complete → route.</li>
- *     </ol>
- *   </li>
- *   <li><b>Record flow complete</b> — finalizes the execution log.</li>
- * </ol>
+ * <h3>Spring auto-wiring</h3>
+ * <p>All {@link NodeHandler} beans in the application context are auto-collected
+ * by Spring via constructor injection ({@code List<NodeHandler>}).  No manual
+ * registration is needed — just annotate your handler with {@code @Component}
+ * and it will be discovered.
  *
- * <p>The execution log captures every node's status, duration, input/output
- * snapshots, and error messages.  The {@link FlowResult#getExecutionId()}
- * can be used to retrieve the full log from the {@link ExecutionRecorder}.
+ * <h3>DAG execution</h3>
+ * <p>Supports both linear chains ({@code next: "b"}) and fork-join DAGs:
+ * <ul>
+ *   <li><b>Fork</b> — {@code next: ["b", "d"]} activates multiple branches.</li>
+ *   <li><b>Join</b> — {@code waitFor: ["b", "d"]} blocks until all listed
+ *       predecessors have completed.</li>
+ * </ul>
+ *
+ * <h3>Execution recording</h3>
+ * <p>The engine builds an {@link ExecutionLog} during the run and calls
+ * {@link ExecutionRecorder#save} exactly once after the flow completes.
+ * There are no per-node callbacks during execution.
  */
 @Service
 public class FlowEngine {
@@ -48,15 +49,7 @@ public class FlowEngine {
     private static final Logger log = LoggerFactory.getLogger(FlowEngine.class);
     private static final int MAX_STEPS = 1000;
 
-    /**
-     * Minimum supported flow definition version (inclusive).
-     * Flow definitions with a version below this will be rejected.
-     */
     public static final String MIN_VERSION = "1.0";
-
-    /**
-     * Current / latest known version.
-     */
     public static final String CURRENT_VERSION = "2.0";
 
     private final ObjectMapper objectMapper;
@@ -64,6 +57,10 @@ public class FlowEngine {
     private final ExecutionRecorder executionRecorder;
     private final Map<String, NodeHandler> handlerRegistry = new ConcurrentHashMap<>();
 
+    /**
+     * Spring injects all {@link NodeHandler} beans automatically via
+     * the {@code List<NodeHandler>} parameter.
+     */
     public FlowEngine(ObjectMapper objectMapper,
                       InputResolver inputResolver,
                       ExecutionRecorder executionRecorder,
@@ -98,11 +95,6 @@ public class FlowEngine {
 
     // ---- version validation -------------------------------------------------
 
-    /**
-     * Check if the flow definition version is supported.
-     *
-     * @throws UnsupportedVersionException if version is below MIN_VERSION
-     */
     public void validateVersion(FlowDefinition definition) {
         String version = definition.getVersion();
         if (version == null || version.isBlank()) {
@@ -115,10 +107,6 @@ public class FlowEngine {
         }
     }
 
-    /**
-     * Compare two dot-separated version strings numerically.
-     * Returns negative if a &lt; b, zero if equal, positive if a &gt; b.
-     */
     public static int compareVersions(String a, String b) {
         String[] aParts = a.split("\\.");
         String[] bParts = b.split("\\.");
@@ -132,11 +120,8 @@ public class FlowEngine {
     }
 
     private static int parseSegment(String s) {
-        try {
-            return Integer.parseInt(s.trim());
-        } catch (NumberFormatException e) {
-            return 0;
-        }
+        try { return Integer.parseInt(s.trim()); }
+        catch (NumberFormatException e) { return 0; }
     }
 
     // ---- execution ----------------------------------------------------------
@@ -145,32 +130,61 @@ public class FlowEngine {
         return execute(definition, new FlowContext(definition.getId()));
     }
 
+    /**
+     * Execute a flow definition with the given context.
+     *
+     * <p>Uses a ready-queue approach to support both linear chains and
+     * fork-join DAGs.  A node becomes "ready" when all its {@code waitFor}
+     * predecessors have completed.
+     */
     public FlowResult execute(FlowDefinition definition, FlowContext context) {
-        // 0. Version validation
         validateVersion(definition);
 
         Map<String, FlowNode> nodeMap = definition.toNodeMap();
         List<String> trace = new ArrayList<>();
-        String currentNodeId = definition.getStartNodeId();
+        Set<String> completedNodes = new LinkedHashSet<>();
+        Deque<String> readyQueue = new ArrayDeque<>();
 
-        // 1. Start recording
         ExecutionLog executionLog = new ExecutionLog(
                 definition.getId(), definition.getName(), definition.getVersion());
-        executionRecorder.onFlowStart(executionLog);
 
         log.info("▶ Starting flow '{}' v{} (executionId={}, start node: '{}')",
                 definition.getId(), definition.getVersion(),
-                executionLog.getExecutionId(), currentNodeId);
+                executionLog.getExecutionId(), definition.getStartNodeId());
 
+        readyQueue.add(definition.getStartNodeId());
         int steps = 0;
+
         try {
-            while (currentNodeId != null && !context.isTerminated() && steps < MAX_STEPS) {
-                steps++;
+            while (!readyQueue.isEmpty() && !context.isTerminated() && steps < MAX_STEPS) {
+                String currentNodeId = readyQueue.poll();
+
+                if (completedNodes.contains(currentNodeId)) {
+                    continue;
+                }
+
                 FlowNode node = nodeMap.get(currentNodeId);
                 if (node == null) {
                     throw new NodeNotFoundException(definition.getId(), currentNodeId);
                 }
 
+                // Join check: are all waitFor predecessors completed?
+                if (node.isJoin() && !completedNodes.containsAll(node.getWaitFor())) {
+                    // Not ready yet — re-enqueue at the back
+                    readyQueue.addLast(currentNodeId);
+                    // Prevent infinite spin: if the queue only contains this node, it's a deadlock
+                    if (readyQueue.size() == 1) {
+                        List<String> missing = new ArrayList<>(node.getWaitFor());
+                        missing.removeAll(completedNodes);
+                        throw new FlowException(
+                                "Deadlock: node '" + currentNodeId + "' waits for " + missing
+                                        + " but they are not reachable",
+                                definition.getId(), currentNodeId);
+                    }
+                    continue;
+                }
+
+                steps++;
                 context.setCurrentNodeId(currentNodeId);
                 trace.add(currentNodeId);
 
@@ -179,21 +193,16 @@ public class FlowEngine {
                     throw new HandlerNotFoundException(definition.getId(), node.getType());
                 }
 
-                // 2. Record node start
+                // Build node execution log
                 NodeExecutionLog nodeLog = new NodeExecutionLog(
                         node.getId(), node.getType(), node.getName(), steps);
 
-                // Resolve inputs
                 resolveInputs(node, context);
                 nodeLog.setInputSnapshot(context.getResolvedInputs());
 
-                executionRecorder.onNodeStart(executionLog, nodeLog);
-
                 try {
-                    // 3. Execute handler
                     HandleResult result = handler.execute(node, context);
 
-                    // 4. Store output
                     Map<String, Object> outputSnapshot = null;
                     if (result.hasOutput()) {
                         context.setNodeOutput(currentNodeId, result.getOutput());
@@ -201,24 +210,27 @@ public class FlowEngine {
                         outputSnapshot = toOutputSnapshot(result.getOutput());
                     }
 
-                    // 5. Record node success
                     nodeLog.markSuccess(outputSnapshot);
-                    executionLog.addNodeLog(nodeLog);
-                    executionRecorder.onNodeComplete(executionLog, nodeLog);
+                    completedNodes.add(currentNodeId);
 
-                    // 6. Route
-                    currentNodeId = result.hasExplicitRoute()
-                            ? result.getNextNodeId()
-                            : node.getNext();
+                    // Determine next node(s)
+                    if (result.hasExplicitRoute()) {
+                        readyQueue.add(result.getNextNodeId());
+                    } else if (node.getNext() != null) {
+                        for (String nxt : node.getNext()) {
+                            if (!completedNodes.contains(nxt)) {
+                                readyQueue.add(nxt);
+                            }
+                        }
+                    }
 
                 } catch (Exception e) {
-                    // Record node failure
                     nodeLog.markFailed(e.getMessage());
                     executionLog.addNodeLog(nodeLog);
-                    executionRecorder.onNodeComplete(executionLog, nodeLog);
                     throw e;
                 }
 
+                executionLog.addNodeLog(nodeLog);
                 context.clearResolvedInputs();
             }
 
@@ -226,28 +238,27 @@ public class FlowEngine {
                 String msg = "Exceeded maximum step limit: " + MAX_STEPS;
                 log.warn("Flow '{}' {}", definition.getId(), msg);
                 executionLog.markFailed(msg);
-                executionRecorder.onFlowComplete(executionLog);
+                executionRecorder.save(executionLog);
                 return FlowResult.failure(definition.getId(), context.getAllVariables(),
                         trace, msg, executionLog.getExecutionId());
             }
 
-            // Flow succeeded
             log.info("✔ Flow '{}' completed successfully in {} step(s)", definition.getId(), steps);
             executionLog.markSuccess();
-            executionRecorder.onFlowComplete(executionLog);
+            executionRecorder.save(executionLog);
             return FlowResult.success(definition.getId(), context.getAllVariables(),
                     trace, executionLog.getExecutionId());
 
         } catch (FlowException e) {
             log.error("✘ Flow '{}' failed at node '{}': {}", definition.getId(), e.getNodeId(), e.getMessage());
             executionLog.markFailed(e.getMessage());
-            executionRecorder.onFlowComplete(executionLog);
+            executionRecorder.save(executionLog);
             return FlowResult.failure(definition.getId(), context.getAllVariables(),
                     trace, e.getMessage(), executionLog.getExecutionId());
         } catch (Exception e) {
             log.error("✘ Flow '{}' failed unexpectedly: {}", definition.getId(), e.getMessage(), e);
             executionLog.markFailed(e.getMessage());
-            executionRecorder.onFlowComplete(executionLog);
+            executionRecorder.save(executionLog);
             return FlowResult.failure(definition.getId(), context.getAllVariables(),
                     trace, e.getMessage(), executionLog.getExecutionId());
         }
@@ -276,16 +287,14 @@ public class FlowEngine {
     }
 
     private void publishOutputAsVariables(String nodeId, NodeOutput output, FlowContext context) {
-        output.getEntries().forEach((name, entry) -> {
-            context.setVariable(nodeId + "." + name, entry.getValue());
-        });
+        output.getEntries().forEach((name, entry) ->
+                context.setVariable(nodeId + "." + name, entry.getValue()));
     }
 
     private Map<String, Object> toOutputSnapshot(NodeOutput output) {
         Map<String, Object> snapshot = new LinkedHashMap<>();
-        output.getEntries().forEach((name, entry) -> {
-            snapshot.put(name, entry.toString());
-        });
+        output.getEntries().forEach((name, entry) ->
+                snapshot.put(name, entry.toString()));
         return snapshot;
     }
 }

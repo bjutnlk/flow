@@ -22,32 +22,12 @@ public class InMemoryExecutionRecorder implements ExecutionRecorder {
     private final Map<String, ExecutionLog> store = new ConcurrentHashMap<>();
 
     @Override
-    public ExecutionLog onFlowStart(ExecutionLog executionLog) {
+    public void save(ExecutionLog executionLog) {
         store.put(executionLog.getExecutionId(), executionLog);
-        log.info("[Recorder] Flow started: executionId={}, flowId={}, version={}",
-                executionLog.getExecutionId(), executionLog.getFlowId(), executionLog.getFlowVersion());
-        return executionLog;
-    }
-
-    @Override
-    public void onNodeStart(ExecutionLog flowLog, NodeExecutionLog nodeLog) {
-        log.debug("[Recorder] Node starting: #{} {} ({})",
-                nodeLog.getStepIndex(), nodeLog.getNodeId(), nodeLog.getNodeType());
-    }
-
-    @Override
-    public void onNodeComplete(ExecutionLog flowLog, NodeExecutionLog nodeLog) {
-        log.debug("[Recorder] Node completed: #{} {} → {} ({}ms)",
-                nodeLog.getStepIndex(), nodeLog.getNodeId(),
-                nodeLog.getStatus(), nodeLog.getDurationMs());
-    }
-
-    @Override
-    public void onFlowComplete(ExecutionLog executionLog) {
-        store.put(executionLog.getExecutionId(), executionLog);
-        log.info("[Recorder] Flow completed: executionId={}, status={}, " +
-                        "nodes={} (ok={}, fail={}), duration={}ms",
-                executionLog.getExecutionId(), executionLog.getStatus(),
+        log.info("[Recorder] Saved execution log: executionId={}, flow='{}', status={}, "
+                        + "nodes={} (ok={}, fail={}), duration={}ms",
+                executionLog.getExecutionId(), executionLog.getFlowId(),
+                executionLog.getStatus(),
                 executionLog.getTotalNodes(), executionLog.getSuccessNodes(),
                 executionLog.getFailedNodes(), executionLog.getTotalDurationMs());
     }

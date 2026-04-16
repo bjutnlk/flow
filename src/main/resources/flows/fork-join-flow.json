@@ -1,0 +1,59 @@
+{
+  "version": "2.0",
+  "id": "fork-join-flow",
+  "name": "Fork-Join Processing",
+  "startNodeId": "start",
+  "nodes": [
+    {
+      "id": "start",
+      "type": "start",
+      "name": "Begin",
+      "next": "prepare"
+    },
+    {
+      "id": "prepare",
+      "type": "submit_form",
+      "name": "Prepare Data",
+      "inputMappings": [
+        { "name": "source", "source": "${dataSource}", "dataType": "STRING" }
+      ],
+      "next": ["branch-b", "branch-d"]
+    },
+    {
+      "id": "branch-b",
+      "type": "submit_form",
+      "name": "Process Branch B",
+      "inputMappings": [
+        { "name": "input", "source": "${prepare.receiptFile}", "dataType": "FILE" },
+        { "name": "mode",  "source": "analysis",              "dataType": "STRING" }
+      ],
+      "next": "merge"
+    },
+    {
+      "id": "branch-d",
+      "type": "submit_form",
+      "name": "Process Branch D",
+      "inputMappings": [
+        { "name": "input", "source": "${prepare.receiptFile}", "dataType": "FILE" },
+        { "name": "mode",  "source": "validation",            "dataType": "STRING" }
+      ],
+      "next": "merge"
+    },
+    {
+      "id": "merge",
+      "type": "aggregate_file",
+      "name": "Merge Results",
+      "waitFor": ["branch-b", "branch-d"],
+      "inputMappings": [
+        { "name": "fromB", "source": "${branch-b.receiptFile}", "dataType": "FILE" },
+        { "name": "fromD", "source": "${branch-d.receiptFile}", "dataType": "FILE" }
+      ],
+      "next": "end"
+    },
+    {
+      "id": "end",
+      "type": "end",
+      "name": "Done"
+    }
+  ]
+}

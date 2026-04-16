@@ -1,47 +1,40 @@
 package com.flow.engine.model;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.annotation.JsonSetter;
+import com.fasterxml.jackson.databind.JsonNode;
 
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 
 /**
  * A single executable node within a flow definition.
  *
- * <p>All nodes are equal in the engine's execution loop — each node is
- * dispatched to its handler, which may produce output, read inputs, and
- * influence routing.  There is no hard category distinction; the
- * {@code type} field alone determines which handler processes the node.
- *
- * <p>Convention (not enforced):
+ * <h3>Routing</h3>
  * <ul>
- *   <li><b>Generic / control-flow types</b> — {@code start}, {@code end},
- *       {@code condition}, {@code switch}, {@code foreach}: business-agnostic
- *       nodes shipped with the engine.</li>
- *   <li><b>Capability types</b> — {@code submit_form}, {@code aggregate_file},
- *       etc.: business-specific nodes registered by the application.</li>
+ *   <li>{@code next} — can be a single node id (string) or a list of
+ *       node ids (fork). When forking, all targets are activated.</li>
+ *   <li>{@code waitFor} — a list of node ids that must all be completed
+ *       before this node can execute (join/converge).</li>
  * </ul>
  *
- * <p>Any node can carry {@code inputMappings} and {@code outputMappings}
- * — the engine resolves them uniformly before/after execution.
+ * <p>Example fork–join:
+ * <pre>{@code
+ * a.next = ["b", "d"]    // a forks to b and d
+ * c.waitFor = ["b", "d"] // c waits for both b and d
+ * }</pre>
+ * This supports the pattern: a→b,d→c where c needs outputs from both b and d.
  */
 public class FlowNode {
 
     private String id;
     private String type;
     private String name;
-    private String next;
+    private List<String> next;
+    private List<String> waitFor;
     private Map<String, Object> properties = new HashMap<>();
     private List<Branch> branches;
     private List<InputMapping> inputMappings;
     private List<OutputMapping> outputMappings;
-
-    /**
-     * Optional: body node id for block-structured handlers like
-     * {@code foreach}.  Points to the first node of the sub-chain
-     * that should be executed per iteration.
-     */
     private String body;
 
     public String getId() {
@@ -68,12 +61,65 @@ public class FlowNode {
         this.name = name;
     }
 
-    public String getNext() {
+    /**
+     * Returns the list of next node ids.  For a single-target node
+     * this is a one-element list; for a fork it's multiple.
+     */
+    public List<String> getNext() {
         return next;
     }
 
-    public void setNext(String next) {
+    /**
+     * Accepts both a single string and a list from JSON:
+     * {@code "next": "b"} or {@code "next": ["b", "d"]}
+     */
+    @JsonSetter("next")
+    public void setNextFromJson(JsonNode jsonNode) {
+        if (jsonNode == null || jsonNode.isNull()) {
+            this.next = null;
+        } else if (jsonNode.isArray()) {
+            this.next = new ArrayList<>();
+            jsonNode.forEach(n -> this.next.add(n.asText()));
+        } else {
+            this.next = List.of(jsonNode.asText());
+        }
+    }
+
+    public void setNext(List<String> next) {
         this.next = next;
+    }
+
+    /**
+     * Convenience: returns the single next node id, or the first one
+     * in a fork.  Returns null if no next is defined.
+     */
+    public String getFirstNext() {
+        return next != null && !next.isEmpty() ? next.get(0) : null;
+    }
+
+    /**
+     * Whether this node forks to multiple targets.
+     */
+    public boolean isFork() {
+        return next != null && next.size() > 1;
+    }
+
+    /**
+     * Node ids that must all be completed before this node runs.
+     */
+    public List<String> getWaitFor() {
+        return waitFor;
+    }
+
+    public void setWaitFor(List<String> waitFor) {
+        this.waitFor = waitFor;
+    }
+
+    /**
+     * Whether this node requires multiple predecessors to complete first.
+     */
+    public boolean isJoin() {
+        return waitFor != null && !waitFor.isEmpty();
     }
 
     public Map<String, Object> getProperties() {
@@ -116,10 +162,6 @@ public class FlowNode {
         this.body = body;
     }
 
-    /**
-     * Conditional/switch branch: evaluated to decide which
-     * {@code targetNodeId} to jump to.
-     */
     public static class Branch {
         private String condition;
 
