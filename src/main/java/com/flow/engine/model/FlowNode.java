@@ -106,7 +106,7 @@ public class FlowNode {
             this.next = new ArrayList<>();
             jsonNode.forEach(n -> this.next.add(n.asText()));
         } else {
-            this.next = List.of(jsonNode.asText());
+            this.next = new ArrayList<>(List.of(jsonNode.asText()));
         }
     }
 

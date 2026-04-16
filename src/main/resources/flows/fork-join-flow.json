@@ -6,35 +6,27 @@
     {
       "id": "start",
       "type": "start",
-      "name": "Begin"
-    },
-    {
-      "id": "prepare",
-      "type": "submit_form",
-      "name": "Prepare Data",
-      "prevNodes": ["start"],
+      "name": "Begin",
       "inputMappings": [
-        { "name": "source", "source": "${dataSource}", "dataType": "STRING" }
+        { "name": "dataSource", "source": "${dataSource}", "dataType": "STRING" }
       ]
     },
     {
       "id": "branch-b",
       "type": "submit_form",
       "name": "Process Branch B",
-      "prevNodes": ["prepare"],
+      "prevNodes": ["start"],
       "inputMappings": [
-        { "name": "input", "source": "${prepare.receiptFile}", "dataType": "FILE" },
-        { "name": "mode",  "source": "analysis",              "dataType": "STRING" }
+        { "name": "mode", "source": "analysis", "dataType": "STRING" }
       ]
     },
     {
       "id": "branch-d",
       "type": "submit_form",
       "name": "Process Branch D",
-      "prevNodes": ["prepare"],
+      "prevNodes": ["start"],
       "inputMappings": [
-        { "name": "input", "source": "${prepare.receiptFile}", "dataType": "FILE" },
-        { "name": "mode",  "source": "validation",            "dataType": "STRING" }
+        { "name": "mode", "source": "validation", "dataType": "STRING" }
       ]
     },
     {
@@ -43,15 +35,20 @@
       "name": "Merge Results",
       "prevNodes": ["branch-b", "branch-d"],
       "inputMappings": [
-        { "name": "fromB", "source": "${branch-b.receiptFile}", "dataType": "FILE" },
-        { "name": "fromD", "source": "${branch-d.receiptFile}", "dataType": "FILE" }
+        { "name": "fromB", "source": "${branch-b.result}", "dataType": "STRING" },
+        { "name": "fromD", "source": "${branch-d.result}", "dataType": "STRING" }
       ]
     },
     {
       "id": "end",
       "type": "end",
       "name": "Done",
-      "prevNodes": ["merge"]
+      "prevNodes": ["merge"],
+      "properties": {
+        "returnValues": {
+          "mergeResult": "${merge.result}"
+        }
+      }
     }
   ]
 }

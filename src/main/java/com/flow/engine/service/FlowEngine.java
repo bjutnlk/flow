@@ -18,6 +18,7 @@ import org.springframework.stereotype.Service;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.*;
+import java.util.Collections;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -213,8 +214,10 @@ public class FlowEngine {
             log.info("✔ Flow '{}' completed successfully in {} step(s)", definition.getId(), steps);
             executionLog.markSuccess();
             executionRecorder.save(executionLog);
+
+            Map<String, Object> returnValues = extractReturnValues(completedNodes, nodeMap, context);
             return FlowResult.success(definition.getId(), context.getAllVariables(),
-                    trace, executionLog.getExecutionId());
+                    returnValues, trace, executionLog.getExecutionId());
 
         } catch (FlowException e) {
             log.error("✘ Flow '{}' failed at node '{}': {}", definition.getId(), e.getNodeId(), e.getMessage());
@@ -255,6 +258,23 @@ public class FlowEngine {
     private void publishOutputAsVariables(String nodeId, NodeOutput output, FlowContext context) {
         output.getEntries().forEach((name, entry) ->
                 context.setVariable(nodeId + "." + name, entry.getValue()));
+    }
+
+    private Map<String, Object> extractReturnValues(Set<String> completedNodes,
+                                                     Map<String, FlowNode> nodeMap,
+                                                     FlowContext context) {
+        for (String nodeId : completedNodes) {
+            FlowNode node = nodeMap.get(nodeId);
+            if (node != null && "end".equals(node.getType())) {
+                NodeOutput output = context.getNodeOutput(nodeId);
+                if (output != null) {
+                    Map<String, Object> rv = new LinkedHashMap<>();
+                    output.getEntries().forEach((k, v) -> rv.put(k, v.getValue()));
+                    return rv;
+                }
+            }
+        }
+        return Collections.emptyMap();
     }
 
     private Map<String, Object> toOutputSnapshot(NodeOutput output) {
