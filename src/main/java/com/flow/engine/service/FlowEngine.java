@@ -5,10 +5,8 @@ import com.flow.engine.exception.FlowException;
 import com.flow.engine.exception.HandlerNotFoundException;
 import com.flow.engine.exception.NodeNotFoundException;
 import com.flow.engine.handler.NodeHandler;
-import com.flow.engine.model.FlowContext;
-import com.flow.engine.model.FlowDefinition;
-import com.flow.engine.model.FlowNode;
-import com.flow.engine.model.FlowResult;
+import com.flow.engine.model.*;
+import com.flow.engine.resolve.InputResolver;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -23,19 +21,21 @@ import java.util.concurrent.ConcurrentHashMap;
 /**
  * Core flow execution engine (Spring {@code @Service} bean).
  *
- * <h3>Usage</h3>
+ * <h3>Execution lifecycle for each node</h3>
  * <ol>
- *   <li>Inject {@code FlowEngine} into any Spring component.</li>
- *   <li>Load a {@link FlowDefinition} from JSON (string, stream, or file).</li>
- *   <li>Call {@link #execute(FlowDefinition, FlowContext)} with an optional
- *       pre-populated context to share variables across nodes.</li>
+ *   <li><b>Resolve inputs</b> — if the node has {@code inputMappings},
+ *       the engine uses {@link InputResolver} to turn source expressions
+ *       ({@code ${nodeA.file}}, {@code file:xxx}, {@code ${var}}) into
+ *       concrete values.  Resolved inputs are placed in the context's
+ *       resolved-input map for the handler to consume.</li>
+ *   <li><b>Execute</b> — the handler's {@link NodeHandler#execute} method
+ *       is called.  If it returns a non-null {@link NodeOutput}, the
+ *       output is stored under the node's id so downstream nodes can
+ *       reference it as {@code ${thisNodeId.fieldName}}.</li>
+ *   <li><b>Route</b> — the handler's {@link NodeHandler#handle} method
+ *       determines the next node id (explicit return or fall back to
+ *       {@code node.next}).</li>
  * </ol>
- *
- * <p>The engine resolves each node's {@code type} to a registered
- * {@link NodeHandler} bean, invokes it, and follows the routing decision
- * (explicit return value from handler → node's {@code next} field → stop).
- *
- * <p>Infinite-loop protection: execution stops after {@value #MAX_STEPS} steps.
  */
 @Service
 public class FlowEngine {
@@ -44,10 +44,14 @@ public class FlowEngine {
     private static final int MAX_STEPS = 1000;
 
     private final ObjectMapper objectMapper;
+    private final InputResolver inputResolver;
     private final Map<String, NodeHandler> handlerRegistry = new ConcurrentHashMap<>();
 
-    public FlowEngine(ObjectMapper objectMapper, List<NodeHandler> handlers) {
+    public FlowEngine(ObjectMapper objectMapper,
+                      InputResolver inputResolver,
+                      List<NodeHandler> handlers) {
         this.objectMapper = objectMapper;
+        this.inputResolver = inputResolver;
         handlers.forEach(h -> {
             handlerRegistry.put(h.getType(), h);
             log.debug("Registered handler for node type '{}'", h.getType());
@@ -55,11 +59,8 @@ public class FlowEngine {
         log.info("FlowEngine initialized with {} handler(s): {}", handlerRegistry.size(), handlerRegistry.keySet());
     }
 
-    // ----- Flow definition loading -------------------------------------------
+    // ---- parsing ------------------------------------------------------------
 
-    /**
-     * Parse a flow definition from a JSON string.
-     */
     public FlowDefinition parse(String json) {
         try {
             return objectMapper.readValue(json, FlowDefinition.class);
@@ -68,9 +69,6 @@ public class FlowEngine {
         }
     }
 
-    /**
-     * Parse a flow definition from an input stream (e.g. classpath resource).
-     */
     public FlowDefinition parse(InputStream inputStream) {
         try {
             return objectMapper.readValue(inputStream, FlowDefinition.class);
@@ -79,22 +77,12 @@ public class FlowEngine {
         }
     }
 
-    // ----- Execution ---------------------------------------------------------
+    // ---- execution ----------------------------------------------------------
 
-    /**
-     * Execute a flow with a new empty context.
-     */
     public FlowResult execute(FlowDefinition definition) {
         return execute(definition, new FlowContext(definition.getId()));
     }
 
-    /**
-     * Execute a flow with a pre-populated context (shared variables).
-     *
-     * @param definition the flow definition (parsed from JSON)
-     * @param context    mutable context carrying shared variables
-     * @return result containing success/failure, final variables, and execution trace
-     */
     public FlowResult execute(FlowDefinition definition, FlowContext context) {
         Map<String, FlowNode> nodeMap = definition.toNodeMap();
         List<String> trace = new ArrayList<>();
@@ -119,9 +107,23 @@ public class FlowEngine {
                     throw new HandlerNotFoundException(definition.getId(), node.getType());
                 }
 
-                String handlerNext = handler.handle(node, context);
+                // 1. Resolve input mappings
+                resolveInputs(node, context);
 
+                // 2. Execute — produce structured output
+                NodeOutput output = handler.execute(node, context);
+                if (output != null) {
+                    context.setNodeOutput(currentNodeId, output);
+                    publishOutputAsVariables(currentNodeId, output, context);
+                    log.debug("Node '{}' produced output: {}", currentNodeId, output);
+                }
+
+                // 3. Route
+                String handlerNext = handler.handle(node, context);
                 currentNodeId = handlerNext != null ? handlerNext : node.getNext();
+
+                // Clean up per-node resolved inputs
+                context.clearResolvedInputs();
             }
 
             if (steps >= MAX_STEPS) {
@@ -142,21 +144,36 @@ public class FlowEngine {
         }
     }
 
-    // ----- Handler management ------------------------------------------------
+    // ---- handler management -------------------------------------------------
 
-    /**
-     * Programmatically register an additional handler (useful for tests or
-     * runtime-registered custom types).
-     */
     public void registerHandler(NodeHandler handler) {
         handlerRegistry.put(handler.getType(), handler);
         log.info("Registered handler for node type '{}'", handler.getType());
     }
 
-    /**
-     * Check whether a handler exists for the given node type.
-     */
     public boolean hasHandler(String nodeType) {
         return handlerRegistry.containsKey(nodeType);
+    }
+
+    // ---- internal -----------------------------------------------------------
+
+    private void resolveInputs(FlowNode node, FlowContext context) {
+        List<InputMapping> mappings = node.getInputMappings();
+        if (mappings == null || mappings.isEmpty()) {
+            return;
+        }
+        Map<String, Object> resolved = inputResolver.resolve(mappings, context);
+        context.setResolvedInputs(resolved);
+        log.debug("Resolved {} input(s) for node '{}'", resolved.size(), node.getId());
+    }
+
+    /**
+     * Also publish each output field as a flat context variable under
+     * the key "nodeId.fieldName" for backward-compatible ${} resolution.
+     */
+    private void publishOutputAsVariables(String nodeId, NodeOutput output, FlowContext context) {
+        output.getEntries().forEach((name, entry) -> {
+            context.setVariable(nodeId + "." + name, entry.getValue());
+        });
     }
 }

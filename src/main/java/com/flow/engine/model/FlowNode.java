@@ -9,12 +9,26 @@ import java.util.Map;
 /**
  * A single executable node within a flow definition.
  *
- * <p>Each node has a unique {@code id}, a {@code type} that determines which
- * {@link com.flow.engine.handler.NodeHandler} processes it, and optional
- * routing information ({@code next} / {@code branches}) for sequential or
- * conditional transitions.
+ * <p>Nodes fall into two categories:</p>
+ * <ul>
+ *   <li><b>flow</b> — structural nodes that control routing (start, end, condition)</li>
+ *   <li><b>capability</b> — business-logic nodes that produce typed outputs
+ *       (submit_form, aggregate_file, etc.)</li>
+ * </ul>
+ *
+ * <p>Capability nodes carry {@code inputMappings} and {@code outputMappings}
+ * that the engine resolves automatically.  Inputs can reference outputs of
+ * upstream nodes via {@code ${nodeId.outputName}}, cloud file IDs via
+ * {@code file:xxx}, or plain context variables.
  */
 public class FlowNode {
+
+    /**
+     * "flow" for routing-only nodes, "capability" for nodes that do real work.
+     * Defaults to "capability" when omitted in JSON so that the common case
+     * (business nodes) doesn't require an extra field.
+     */
+    private String category = "capability";
 
     private String id;
     private String type;
@@ -22,6 +36,24 @@ public class FlowNode {
     private String next;
     private Map<String, Object> properties = new HashMap<>();
     private List<Branch> branches;
+    private List<InputMapping> inputMappings;
+    private List<OutputMapping> outputMappings;
+
+    public String getCategory() {
+        return category;
+    }
+
+    public void setCategory(String category) {
+        this.category = category;
+    }
+
+    public boolean isFlowNode() {
+        return "flow".equals(category);
+    }
+
+    public boolean isCapabilityNode() {
+        return !"flow".equals(category);
+    }
 
     public String getId() {
         return id;
@@ -69,6 +101,22 @@ public class FlowNode {
 
     public void setBranches(List<Branch> branches) {
         this.branches = branches;
+    }
+
+    public List<InputMapping> getInputMappings() {
+        return inputMappings;
+    }
+
+    public void setInputMappings(List<InputMapping> inputMappings) {
+        this.inputMappings = inputMappings;
+    }
+
+    public List<OutputMapping> getOutputMappings() {
+        return outputMappings;
+    }
+
+    public void setOutputMappings(List<OutputMapping> outputMappings) {
+        this.outputMappings = outputMappings;
     }
 
     /**

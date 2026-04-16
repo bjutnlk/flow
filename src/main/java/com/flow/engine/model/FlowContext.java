@@ -6,14 +6,23 @@ import java.util.concurrent.ConcurrentHashMap;
 /**
  * Shared execution context that travels through every node in a flow run.
  *
- * <p>Nodes read and write variables via {@link #setVariable}/{@link #getVariable},
- * making data produced by an earlier node available to later ones without
- * external coupling.
+ * <p>Two storage tiers:</p>
+ * <ol>
+ *   <li><b>Variables</b> — flat key-value pairs set via
+ *       {@link #setVariable}/{@link #getVariable}.  Backward-compatible
+ *       with the original API; referenced as {@code ${key}}.</li>
+ *   <li><b>Node outputs</b> — structured {@link NodeOutput} objects
+ *       stored per node id after each handler completes.  Referenced as
+ *       {@code ${nodeId.outputName}}.  This enables the A→B→C scenario
+ *       where C's input is A's output file.</li>
+ * </ol>
  */
 public class FlowContext {
 
     private final String flowId;
     private final Map<String, Object> variables = new ConcurrentHashMap<>();
+    private final Map<String, NodeOutput> nodeOutputs = new ConcurrentHashMap<>();
+    private final Map<String, Object> resolvedInputs = new ConcurrentHashMap<>();
     private String currentNodeId;
     private boolean terminated;
 
@@ -24,6 +33,8 @@ public class FlowContext {
     public String getFlowId() {
         return flowId;
     }
+
+    // ---- flat variables (backward compat) ----
 
     public void setVariable(String key, Object value) {
         variables.put(key, value);
@@ -52,6 +63,51 @@ public class FlowContext {
         return new ConcurrentHashMap<>(variables);
     }
 
+    // ---- per-node structured outputs ----
+
+    public void setNodeOutput(String nodeId, NodeOutput output) {
+        nodeOutputs.put(nodeId, output);
+    }
+
+    public NodeOutput getNodeOutput(String nodeId) {
+        return nodeOutputs.get(nodeId);
+    }
+
+    /**
+     * Resolve {@code ${nodeId.field}} — returns the output value of a
+     * specific field from a previously executed node.
+     */
+    public Object getNodeOutputValue(String nodeId, String field) {
+        NodeOutput output = nodeOutputs.get(nodeId);
+        return output != null ? output.getValue(field) : null;
+    }
+
+    public Map<String, NodeOutput> getAllNodeOutputs() {
+        return new ConcurrentHashMap<>(nodeOutputs);
+    }
+
+    // ---- resolved inputs for current node ----
+
+    public void setResolvedInputs(Map<String, Object> inputs) {
+        resolvedInputs.clear();
+        resolvedInputs.putAll(inputs);
+    }
+
+    @SuppressWarnings("unchecked")
+    public <T> T getResolvedInput(String name) {
+        return (T) resolvedInputs.get(name);
+    }
+
+    public Map<String, Object> getResolvedInputs() {
+        return new ConcurrentHashMap<>(resolvedInputs);
+    }
+
+    public void clearResolvedInputs() {
+        resolvedInputs.clear();
+    }
+
+    // ---- execution state ----
+
     public String getCurrentNodeId() {
         return currentNodeId;
     }
@@ -64,9 +120,6 @@ public class FlowContext {
         return terminated;
     }
 
-    /**
-     * Signal that the flow should stop after the current node completes.
-     */
     public void terminate() {
         this.terminated = true;
     }
@@ -74,6 +127,7 @@ public class FlowContext {
     @Override
     public String toString() {
         return "FlowContext{flowId='" + flowId + "', currentNode='" + currentNodeId
-                + "', vars=" + variables + '}';
+                + "', vars=" + variables
+                + ", outputs=" + nodeOutputs.keySet() + '}';
     }
 }
