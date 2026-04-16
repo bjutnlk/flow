@@ -79,7 +79,9 @@ public class FlowEngine {
 
     public FlowDefinition parse(String json) {
         try {
-            return objectMapper.readValue(json, FlowDefinition.class);
+            FlowDefinition def = objectMapper.readValue(json, FlowDefinition.class);
+            def.resolve();
+            return def;
         } catch (IOException e) {
             throw new IllegalArgumentException("Failed to parse flow JSON", e);
         }
@@ -87,7 +89,9 @@ public class FlowEngine {
 
     public FlowDefinition parse(InputStream inputStream) {
         try {
-            return objectMapper.readValue(inputStream, FlowDefinition.class);
+            FlowDefinition def = objectMapper.readValue(inputStream, FlowDefinition.class);
+            def.resolve();
+            return def;
         } catch (IOException e) {
             throw new IllegalArgumentException("Failed to parse flow JSON from stream", e);
         }

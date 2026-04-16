@@ -1,5 +1,6 @@
 package com.flow.engine.model;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.annotation.JsonSetter;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -9,28 +10,48 @@ import java.util.*;
 /**
  * A single executable node within a flow definition.
  *
- * <h3>Routing</h3>
+ * <h3>Graph topology in JSON</h3>
+ * <p>Each node declares its predecessors via {@code prevNodes}:
+ * <pre>{@code
+ * { "id": "c", "prevNodes": ["b", "d"], ... }
+ * }</pre>
+ * This means node c comes after both b and d.
+ *
+ * <p>During {@link FlowDefinition#resolve()}, the engine automatically
+ * computes:
  * <ul>
- *   <li>{@code next} — can be a single node id (string) or a list of
- *       node ids (fork). When forking, all targets are activated.</li>
- *   <li>{@code waitFor} — a list of node ids that must all be completed
- *       before this node can execute (join/converge).</li>
+ *   <li>{@code next} — forward links (derived from other nodes' prevNodes)</li>
+ *   <li>{@code waitFor} — set to prevNodes when a node has 2+ predecessors
+ *       (join/converge point)</li>
  * </ul>
  *
- * <p>Example fork–join:
- * <pre>{@code
- * a.next = ["b", "d"]    // a forks to b and d
- * c.waitFor = ["b", "d"] // c waits for both b and d
- * }</pre>
- * This supports the pattern: a→b,d→c where c needs outputs from both b and d.
+ * <p>{@code next} can also be set explicitly in JSON for backward
+ * compatibility or for fork scenarios ({@code "next": ["b", "d"]}).
  */
 public class FlowNode {
 
     private String id;
     private String type;
     private String name;
+
+    /**
+     * Declared in JSON: which nodes come before this one.
+     * The engine uses this to build the forward graph.
+     */
+    private List<String> prevNodes;
+
+    /**
+     * Computed (or explicit in JSON): which nodes come after this one.
+     */
     private List<String> next;
+
+    /**
+     * Computed: node ids that must all complete before this node runs.
+     * Auto-set when a node has multiple prevNodes.
+     */
+    @JsonIgnore
     private List<String> waitFor;
+
     private Map<String, Object> properties = new HashMap<>();
     private List<Branch> branches;
     private List<InputMapping> inputMappings;
@@ -61,18 +82,22 @@ public class FlowNode {
         this.name = name;
     }
 
-    /**
-     * Returns the list of next node ids.  For a single-target node
-     * this is a one-element list; for a fork it's multiple.
-     */
+    // ---- prevNodes (from JSON) ----
+
+    public List<String> getPrevNodes() {
+        return prevNodes;
+    }
+
+    public void setPrevNodes(List<String> prevNodes) {
+        this.prevNodes = prevNodes;
+    }
+
+    // ---- next (computed or explicit) ----
+
     public List<String> getNext() {
         return next;
     }
 
-    /**
-     * Accepts both a single string and a list from JSON:
-     * {@code "next": "b"} or {@code "next": ["b", "d"]}
-     */
     @JsonSetter("next")
     public void setNextFromJson(JsonNode jsonNode) {
         if (jsonNode == null || jsonNode.isNull()) {
@@ -89,24 +114,28 @@ public class FlowNode {
         this.next = next;
     }
 
-    /**
-     * Convenience: returns the single next node id, or the first one
-     * in a fork.  Returns null if no next is defined.
-     */
     public String getFirstNext() {
         return next != null && !next.isEmpty() ? next.get(0) : null;
     }
 
-    /**
-     * Whether this node forks to multiple targets.
-     */
     public boolean isFork() {
         return next != null && next.size() > 1;
     }
 
     /**
-     * Node ids that must all be completed before this node runs.
+     * Add a forward link (used by resolve to build next from prevNodes).
      */
+    public void addNext(String nodeId) {
+        if (this.next == null) {
+            this.next = new ArrayList<>();
+        }
+        if (!this.next.contains(nodeId)) {
+            this.next.add(nodeId);
+        }
+    }
+
+    // ---- waitFor (computed) ----
+
     public List<String> getWaitFor() {
         return waitFor;
     }
@@ -115,12 +144,11 @@ public class FlowNode {
         this.waitFor = waitFor;
     }
 
-    /**
-     * Whether this node requires multiple predecessors to complete first.
-     */
     public boolean isJoin() {
         return waitFor != null && !waitFor.isEmpty();
     }
+
+    // ---- other fields ----
 
     public Map<String, Object> getProperties() {
         return properties;
