@@ -1,0 +1,54 @@
+{
+  "version": "2.0",
+  "id": "fork-join-flow",
+  "name": "Fork-Join Processing",
+  "nodes": [
+    {
+      "id": "start",
+      "type": "start",
+      "name": "Begin",
+      "inputMappings": [
+        { "name": "dataSource", "source": "${dataSource}", "dataType": "STRING" }
+      ]
+    },
+    {
+      "id": "branch-b",
+      "type": "submit_form",
+      "name": "Process Branch B",
+      "prevNodes": ["start"],
+      "inputMappings": [
+        { "name": "mode", "source": "analysis", "dataType": "STRING" }
+      ]
+    },
+    {
+      "id": "branch-d",
+      "type": "submit_form",
+      "name": "Process Branch D",
+      "prevNodes": ["start"],
+      "inputMappings": [
+        { "name": "mode", "source": "validation", "dataType": "STRING" }
+      ]
+    },
+    {
+      "id": "merge",
+      "type": "aggregate_file",
+      "name": "Merge Results",
+      "prevNodes": ["branch-b", "branch-d"],
+      "inputMappings": [
+        { "name": "fromB", "source": "${branch-b.result}", "dataType": "STRING" },
+        { "name": "fromD", "source": "${branch-d.result}", "dataType": "STRING" }
+      ]
+    },
+    {
+      "id": "end",
+      "type": "end",
+      "name": "Done",
+      "prevNodes": ["merge"],
+      "properties": {
+        "returnValues": {
+          "mergeResult": "${merge.result}"
+        }
+      }
+    }
+  ]
+}
