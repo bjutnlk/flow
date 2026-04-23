@@ -49,19 +49,18 @@ public class ZipExtractService {
 
     private final FileStorageService storage;
     private final ZipExtractRecordRepository repository;
-    private final int maxDepth;
+    private int maxDepth = DEFAULT_MAX_DEPTH;
 
     public ZipExtractService(FileStorageService storage,
                              ZipExtractRecordRepository repository) {
-        this(storage, repository, DEFAULT_MAX_DEPTH);
-    }
-
-    ZipExtractService(FileStorageService storage,
-                      ZipExtractRecordRepository repository,
-                      int maxDepth) {
         this.storage = storage;
         this.repository = repository;
+    }
+
+    /** Override the default nested-zip depth limit (tests / advanced use). */
+    public ZipExtractService withMaxDepth(int maxDepth) {
         this.maxDepth = maxDepth;
+        return this;
     }
 
     /**
